@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(git clone:*)",
+      "Bash(cat:*)",
+      "Bash(nix flake check:*)",
+      "Bash(nix develop:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
