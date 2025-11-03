@@ -5,7 +5,8 @@
       "Bash(git clone:*)",
       "Bash(cat:*)",
       "Bash(nix flake check:*)",
-      "Bash(nix develop:*)"
+      "Bash(nix develop:*)",
+      "Bash(go test:*)"
     ],
     "deny": [],
     "ask": []

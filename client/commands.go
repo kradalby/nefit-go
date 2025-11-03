@@ -7,9 +7,9 @@ import (
 	"github.com/kradalby/nefit-go/types"
 )
 
-// Status retrieves the complete system status
-func (c *SimpleClient) Status(ctx context.Context, includeOutdoorTemp bool) (*types.Status, error) {
-	// Get main status
+// Status retrieves the complete system status including temperatures, modes, and boiler state.
+// If includeOutdoorTemp is true, an additional request is made to fetch outdoor temperature data.
+func (c *Client) Status(ctx context.Context, includeOutdoorTemp bool) (*types.Status, error) {
 	statusData, err := c.Get(ctx, types.URIStatus)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
@@ -25,7 +25,6 @@ func (c *SimpleClient) Status(ctx context.Context, includeOutdoorTemp bool) (*ty
 		return nil, fmt.Errorf("status response missing 'value' field")
 	}
 
-	// Parse status fields
 	status := &types.Status{
 		UserMode:                 getString(valueMap, "UMD"),
 		ClockProgram:             getString(valueMap, "CPM"),
@@ -52,7 +51,6 @@ func (c *SimpleClient) Status(ctx context.Context, includeOutdoorTemp bool) (*ty
 		HEDDeviceAtHome:          parseBoolean(getString(valueMap, "HED_DEV")),
 	}
 
-	// Get outdoor temperature if requested
 	if includeOutdoorTemp {
 		outdoorData, err := c.Get(ctx, types.URIOutdoorTemp)
 		if err == nil {
@@ -66,8 +64,9 @@ func (c *SimpleClient) Status(ctx context.Context, includeOutdoorTemp bool) (*ty
 	return status, nil
 }
 
-// Pressure retrieves system pressure information
-func (c *SimpleClient) Pressure(ctx context.Context) (*types.Pressure, error) {
+// Pressure retrieves the system pressure reading in bar.
+// Low pressure may indicate a leak or the need to refill the system.
+func (c *Client) Pressure(ctx context.Context) (*types.Pressure, error) {
 	data, err := c.Get(ctx, types.URIPressure)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pressure: %w", err)
@@ -88,18 +87,17 @@ func (c *SimpleClient) Pressure(ctx context.Context) (*types.Pressure, error) {
 	return pressure, nil
 }
 
-// SetTemperature sets the manual temperature setpoint
-func (c *SimpleClient) SetTemperature(ctx context.Context, temperature float64) error {
+// SetTemperature sets the manual temperature setpoint and enables manual override mode.
+// This requires three separate API calls to fully configure the temperature override.
+func (c *Client) SetTemperature(ctx context.Context, temperature float64) error {
 	data := map[string]interface{}{
 		"value": temperature,
 	}
 
-	// Set manual temperature
 	if err := c.Put(ctx, types.URIManualSetpoint, data); err != nil {
 		return fmt.Errorf("failed to set manual temperature: %w", err)
 	}
 
-	// Enable manual override
 	overrideData := map[string]string{
 		"value": "on",
 	}
@@ -107,7 +105,6 @@ func (c *SimpleClient) SetTemperature(ctx context.Context, temperature float64) 
 		return fmt.Errorf("failed to enable manual override: %w", err)
 	}
 
-	// Set override temperature
 	if err := c.Put(ctx, types.URIManualTempOverrideTemp, data); err != nil {
 		return fmt.Errorf("failed to set override temperature: %w", err)
 	}
@@ -115,8 +112,8 @@ func (c *SimpleClient) SetTemperature(ctx context.Context, temperature float64) 
 	return nil
 }
 
-// SetUserMode sets the user mode (manual or clock)
-func (c *SimpleClient) SetUserMode(ctx context.Context, mode string) error {
+// SetUserMode switches between "manual" and "clock" (scheduled) heating modes.
+func (c *Client) SetUserMode(ctx context.Context, mode string) error {
 	if mode != "manual" && mode != "clock" {
 		return fmt.Errorf("invalid mode: %s (must be 'manual' or 'clock')", mode)
 	}
@@ -128,15 +125,14 @@ func (c *SimpleClient) SetUserMode(ctx context.Context, mode string) error {
 	return c.Put(ctx, types.URIUserMode, data)
 }
 
-// SetHotWaterSupply enables or disables hot water supply
-func (c *SimpleClient) SetHotWaterSupply(ctx context.Context, enabled bool) error {
-	// Get current status to determine which endpoint to use
+// SetHotWaterSupply enables or disables hot water supply.
+// The API endpoint used depends on the current user mode (manual vs clock).
+func (c *Client) SetHotWaterSupply(ctx context.Context, enabled bool) error {
 	status, err := c.Status(ctx, false)
 	if err != nil {
 		return fmt.Errorf("failed to get status: %w", err)
 	}
 
-	// Select endpoint based on user mode
 	endpoint := types.URIHotWaterManualMode
 	if status.UserMode == "clock" {
 		endpoint = types.URIHotWaterClockMode
@@ -154,15 +150,14 @@ func (c *SimpleClient) SetHotWaterSupply(ctx context.Context, enabled bool) erro
 	return c.Put(ctx, endpoint, data)
 }
 
-// HotWaterSupply gets the current hot water supply status
-func (c *SimpleClient) HotWaterSupply(ctx context.Context) (bool, error) {
-	// Get current status to determine which endpoint to use
+// HotWaterSupply retrieves the current hot water supply status (on/off).
+// The API endpoint used depends on the current user mode (manual vs clock).
+func (c *Client) HotWaterSupply(ctx context.Context) (bool, error) {
 	status, err := c.Status(ctx, false)
 	if err != nil {
 		return false, fmt.Errorf("failed to get status: %w", err)
 	}
 
-	// Select endpoint based on user mode
 	endpoint := types.URIHotWaterManualMode
 	if status.UserMode == "clock" {
 		endpoint = types.URIHotWaterClockMode
@@ -181,8 +176,6 @@ func (c *SimpleClient) HotWaterSupply(ctx context.Context) (bool, error) {
 	value := getString(dataMap, "value")
 	return value == "on", nil
 }
-
-// Utility functions for parsing response data
 
 func getString(m map[string]interface{}, key string) string {
 	if val, ok := m[key]; ok {
@@ -205,7 +198,6 @@ func getFloat(m map[string]interface{}, key string) float64 {
 		case int64:
 			return float64(v)
 		case string:
-			// Try parsing string as float
 			var f float64
 			fmt.Sscanf(v, "%f", &f)
 			return f

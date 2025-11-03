@@ -68,7 +68,7 @@ Examples:
 
 // Helper functions
 
-func createClient() (*client.SimpleClient, error) {
+func createClient() (*client.Client, error) {
 	if *serialNumber == "" {
 		return nil, fmt.Errorf("serial number required (--serial or NEFIT_SERIAL_NUMBER)")
 	}
@@ -85,7 +85,7 @@ func createClient() (*client.SimpleClient, error) {
 		Password:     *password,
 	}
 
-	return client.NewSimpleClient(config)
+	return client.NewClient(config)
 }
 
 func printJSON(v interface{}) error {
@@ -106,7 +106,7 @@ func printJSON(v interface{}) error {
 	return nil
 }
 
-func connectClient(c *client.SimpleClient) error {
+func connectClient(c *client.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 

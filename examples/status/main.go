@@ -12,7 +12,6 @@ import (
 )
 
 func main() {
-	// Read credentials from environment variables
 	serialNumber := os.Getenv("NEFIT_SERIAL_NUMBER")
 	accessKey := os.Getenv("NEFIT_ACCESS_KEY")
 	password := os.Getenv("NEFIT_PASSWORD")
@@ -21,21 +20,18 @@ func main() {
 		log.Fatal("Please set NEFIT_SERIAL_NUMBER, NEFIT_ACCESS_KEY, and NEFIT_PASSWORD environment variables")
 	}
 
-	// Create client configuration
 	config := client.Config{
 		SerialNumber: serialNumber,
 		AccessKey:    accessKey,
 		Password:     password,
 	}
 
-	// Create client
-	c, err := client.NewSimpleClient(config)
+	c, err := client.NewClient(config)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 	defer c.Close()
 
-	// Connect to the Nefit Easy backend
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -45,19 +41,16 @@ func main() {
 	}
 	fmt.Println("Connected successfully!")
 
-	// Get system status
 	fmt.Println("\nFetching system status...")
-	status, err := c.Status(ctx, true) // Include outdoor temperature
+	status, err := c.Status(ctx, true)
 	if err != nil {
 		log.Fatalf("Failed to get status: %v", err)
 	}
 
-	// Print status as JSON
 	statusJSON, _ := json.MarshalIndent(status, "", "  ")
 	fmt.Println("\nSystem Status:")
 	fmt.Println(string(statusJSON))
 
-	// Get system pressure
 	fmt.Println("\nFetching system pressure...")
 	pressure, err := c.Pressure(ctx)
 	if err != nil {
@@ -66,7 +59,6 @@ func main() {
 
 	fmt.Printf("\nSystem Pressure: %.2f %s\n", pressure.Pressure, pressure.Unit)
 
-	// Get hot water supply status
 	fmt.Println("\nFetching hot water supply status...")
 	hotWater, err := c.HotWaterSupply(ctx)
 	if err != nil {

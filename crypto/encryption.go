@@ -12,12 +12,12 @@ import (
 // Magic key used by Bosch/Nefit protocol
 const magicHex = "58f18d70f667c9c79ef7de435bf0f9b1553bbb6e61816212ab80e5b0d351fbb1"
 
-// Encryptor handles AES-256-ECB encryption/decryption for Nefit Easy protocol
+// Encryptor handles AES-256-ECB encryption/decryption for the Nefit Easy protocol.
 type Encryptor struct {
 	key []byte
 }
 
-// NewEncryptor creates a new encryptor with the given credentials
+// NewEncryptor creates an encryptor initialized with a key derived from the provided credentials.
 func NewEncryptor(serialNumber, accessKey, password string) (*Encryptor, error) {
 	magic, err := hex.DecodeString(magicHex)
 	if err != nil {
@@ -54,14 +54,13 @@ func generateKey(magic []byte, accessKey, password string) []byte {
 	return key
 }
 
-// Encrypt encrypts data using AES-256-ECB and returns base64-encoded result
+// Encrypt encrypts data using AES-256-ECB and returns a base64-encoded result.
 func (e *Encryptor) Encrypt(data string) (string, error) {
 	block, err := aes.NewCipher(e.key)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Convert string to bytes
 	plaintext := []byte(data)
 
 	// Apply manual PKCS#7-style padding to 16-byte blocks
@@ -76,18 +75,16 @@ func (e *Encryptor) Encrypt(data string) (string, error) {
 		block.Encrypt(ciphertext[i:i+aes.BlockSize], plaintext[i:i+aes.BlockSize])
 	}
 
-	// Return base64-encoded result
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// Decrypt decrypts base64-encoded data using AES-256-ECB
+// Decrypt decrypts base64-encoded data using AES-256-ECB.
 func (e *Encryptor) Decrypt(data string) (string, error) {
 	block, err := aes.NewCipher(e.key)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Decode from base64
 	ciphertext, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
@@ -100,7 +97,6 @@ func (e *Encryptor) Decrypt(data string) (string, error) {
 		ciphertext = append(ciphertext, padding...)
 	}
 
-	// Decrypt using ECB mode
 	plaintext := make([]byte, len(ciphertext))
 	for i := 0; i < len(ciphertext); i += aes.BlockSize {
 		block.Decrypt(plaintext[i:i+aes.BlockSize], ciphertext[i:i+aes.BlockSize])
@@ -109,14 +105,13 @@ func (e *Encryptor) Decrypt(data string) (string, error) {
 	return string(plaintext), nil
 }
 
-// DecryptAndStrip decrypts data and removes null byte padding
+// DecryptAndStrip decrypts data and removes trailing null byte padding.
 func (e *Encryptor) DecryptAndStrip(data string) (string, error) {
 	decrypted, err := e.Decrypt(data)
 	if err != nil {
 		return "", err
 	}
 
-	// Remove null byte padding (from end)
 	for i := len(decrypted) - 1; i >= 0; i-- {
 		if decrypted[i] != 0 {
 			return decrypted[:i+1], nil
@@ -126,7 +121,6 @@ func (e *Encryptor) DecryptAndStrip(data string) (string, error) {
 	return decrypted, nil
 }
 
-// ecbEncrypt encrypts data using ECB mode
 type ecb struct {
 	b         cipher.Block
 	blockSize int

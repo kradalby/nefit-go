@@ -6,59 +6,34 @@ import (
 )
 
 const (
-	// DefaultHost is the Bosch XMPP server
 	DefaultHost = "wa2-mz36-qrmzh6.bosch.de"
-
-	// DefaultPort is the XMPP client-to-server port
 	DefaultPort = 5222
 
 	// AccessKeyPrefix is prepended to the access key for authentication
 	AccessKeyPrefix = "Ct7ZR03b_"
 
-	// RRCContactPrefix is used for the JID (from address)
 	RRCContactPrefix = "rrccontact_"
-
-	// RRCGatewayPrefix is used for the resource (to address)
 	RRCGatewayPrefix = "rrcgateway_"
 
-	// DefaultPingInterval is how often to send keepalive pings
 	DefaultPingInterval = 30 * time.Second
-
-	// DefaultMaxRetries is the maximum number of retry attempts
-	DefaultMaxRetries = 15
-
-	// DefaultRetryTimeout is the timeout for each request attempt
+	DefaultMaxRetries   = 15
 	DefaultRetryTimeout = 2 * time.Second
 )
 
-// Config holds the configuration for a Nefit Easy client
+// Config holds the configuration for a Nefit Easy client.
 type Config struct {
-	// Serial number of the device
 	SerialNumber string
+	AccessKey    string
+	Password     string
 
-	// Access key (obtained from the device)
-	AccessKey string
-
-	// Password (user-set password)
-	Password string
-
-	// XMPP host (default: wa2-mz36-qrmzh6.bosch.de)
-	Host string
-
-	// XMPP port (default: 5222)
-	Port int
-
-	// PingInterval for keepalive (default: 30s)
+	Host         string
+	Port         int
 	PingInterval time.Duration
-
-	// MaxRetries for failed requests (default: 15)
-	MaxRetries int
-
-	// RetryTimeout per request (default: 2s)
+	MaxRetries   int
 	RetryTimeout time.Duration
 }
 
-// Validate checks if the config has required fields
+// Validate ensures all required credentials are present.
 func (c *Config) Validate() error {
 	if c.SerialNumber == "" {
 		return fmt.Errorf("serial number is required")
@@ -72,7 +47,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// WithDefaults returns a new config with default values filled in
+// WithDefaults returns a copy of the config with unset fields populated from defaults.
 func (c Config) WithDefaults() Config {
 	if c.Host == "" {
 		c.Host = DefaultHost
@@ -92,17 +67,19 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-// JID returns the "from" JID (rrccontact_SERIAL@HOST)
+// JID returns the client JID used as the "from" address in XMPP messages.
+// Format: rrccontact_SERIAL@HOST
 func (c *Config) JID() string {
 	return fmt.Sprintf("%s%s@%s", RRCContactPrefix, c.SerialNumber, c.Host)
 }
 
-// ResourceJID returns the "to" resource JID (rrcgateway_SERIAL@HOST)
+// ResourceJID returns the backend JID used as the "to" address in XMPP messages.
+// Format: rrcgateway_SERIAL@HOST
 func (c *Config) ResourceJID() string {
 	return fmt.Sprintf("%s%s@%s", RRCGatewayPrefix, c.SerialNumber, c.Host)
 }
 
-// AuthPassword returns the password with the access key prefix
+// AuthPassword returns the authentication password by prepending the required prefix to the access key.
 func (c *Config) AuthPassword() string {
 	return AccessKeyPrefix + c.AccessKey
 }

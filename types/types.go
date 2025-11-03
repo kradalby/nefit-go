@@ -1,6 +1,6 @@
 package types
 
-// Status represents the complete system status
+// Status contains comprehensive heating system state including temperatures, modes, and diagnostics.
 type Status struct {
 	UserMode                 string  `json:"user_mode"`                    // "manual" or "clock"
 	ClockProgram             string  `json:"clock_program"`                // Current program mode
@@ -29,57 +29,57 @@ type Status struct {
 	OutdoorSourceType        string  `json:"outdoor_source_type,omitempty"` // Source of outdoor temp data
 }
 
-// Pressure represents system pressure information
+// Pressure contains system pressure readings and valid operating ranges.
 type Pressure struct {
-	Pressure float64 `json:"pressure"`          // Current pressure
-	Unit     string  `json:"unit"`              // Unit of measurement (e.g., "bar")
-	MinValue float64 `json:"min_value"`         // Minimum valid pressure
-	MaxValue float64 `json:"max_value"`         // Maximum valid pressure
+	Pressure float64 `json:"pressure"`
+	Unit     string  `json:"unit"`              // e.g., "bar"
+	MinValue float64 `json:"min_value"`
+	MaxValue float64 `json:"max_value"`
 }
 
-// HotWaterSupply represents hot water system status
+// HotWaterSupply contains hot water system operational status.
 type HotWaterSupply struct {
-	Active bool   `json:"active"` // Is hot water active
-	Mode   string `json:"mode"`   // Operation mode
+	Active bool   `json:"active"`
+	Mode   string `json:"mode"`
 }
 
-// Location represents device location information
+// Location contains device geographic position and timezone.
 type Location struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
 	Timezone  string  `json:"timezone"`
 }
 
-// ProgramSwitchpoint represents a single program switchpoint
+// ProgramSwitchpoint defines a scheduled temperature change at a specific time and day.
 type ProgramSwitchpoint struct {
 	DayOfWeek   int     `json:"day_of_week"`    // 0=Sunday, 1=Monday, etc.
 	Time        string  `json:"time"`           // HH:MM format
-	Temperature float64 `json:"temperature"`    // Target temperature
+	Temperature float64 `json:"temperature"`
 }
 
-// Program represents the heating schedule
+// Program defines a heating schedule with multiple temperature switchpoints.
 type Program struct {
 	Active      bool                  `json:"active"`
 	Switchpoints []ProgramSwitchpoint `json:"switchpoints"`
 }
 
-// GasUsage represents gas consumption data
+// GasUsage contains cumulative gas consumption readings.
 type GasUsage struct {
-	Day   float64 `json:"day"`    // Today's consumption
-	Month float64 `json:"month"`  // This month's consumption
-	Year  float64 `json:"year"`   // This year's consumption
-	Unit  string  `json:"unit"`   // Unit (e.g., "m³")
+	Day   float64 `json:"day"`
+	Month float64 `json:"month"`
+	Year  float64 `json:"year"`
+	Unit  string  `json:"unit"`   // e.g., "m³"
 }
 
-// SetTemperatureResult represents the result of a temperature change
+// SetTemperatureResult contains the outcome of a temperature setpoint change.
 type SetTemperatureResult struct {
 	Status             string  `json:"status"`               // "ok" or error message
-	NewSetpoint        float64 `json:"new_setpoint"`         // New temperature setpoint
-	PreviousSetpoint   float64 `json:"previous_setpoint"`    // Previous setpoint
-	CurrentTemperature float64 `json:"current_temperature"`  // Current actual temperature
+	NewSetpoint        float64 `json:"new_setpoint"`
+	PreviousSetpoint   float64 `json:"previous_setpoint"`
+	CurrentTemperature float64 `json:"current_temperature"`
 }
 
-// RawResponse represents a raw API response for unknown endpoints
+// RawResponse wraps generic API responses for endpoints without specific types.
 type RawResponse struct {
 	Value   interface{} `json:"value"`
 	Type    string      `json:"type,omitempty"`

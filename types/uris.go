@@ -1,6 +1,5 @@
 package types
 
-// API endpoint URIs
 const (
 	// Status endpoints
 	URIStatus      = "/ecus/rrc/uiStatus"

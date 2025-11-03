@@ -25,37 +25,35 @@ type PushNotification struct {
 	Data interface{}
 }
 
-// SimpleClient is the main Nefit Easy XMPP client using simpler XMPP library
-type SimpleClient struct {
+// Client represents an active connection to the Nefit Easy backend.
+// It handles XMPP communication, encryption, request queueing, and push notifications.
+type Client struct {
 	config    Config
 	encryptor *crypto.Encryptor
 	queue     *RequestQueue
 
-	// XMPP connection
 	xmppClient *xmpp.Client
 	connMu     sync.RWMutex
 
-	// Pending requests (for deduplication and response handling)
+	// Backend limitation: only one concurrent request allowed, so we need request/response correlation
 	pendingRequests   map[string]chan *protocol.HTTPResponse
 	pendingErrors     map[string]chan error
 	pendingMu         sync.RWMutex
 
-	// Event handlers and push notification queue
 	eventHandlers        []EventHandler
 	eventHandlersMu      sync.RWMutex
 	pushNotificationChan chan PushNotification
 
-	// Logging
 	logger *slog.Logger
 
-	// Context management
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// NewSimpleClient creates a new Nefit Easy client using simple XMPP
-func NewSimpleClient(config Config) (*SimpleClient, error) {
+// NewClient creates a new Nefit Easy client with the given configuration.
+// The client must be explicitly connected using Connect() before use.
+func NewClient(config Config) (*Client, error) {
 	config = config.WithDefaults()
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
@@ -68,13 +66,13 @@ func NewSimpleClient(config Config) (*SimpleClient, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	client := &SimpleClient{
+	client := &Client{
 		config:               config,
 		encryptor:            encryptor,
 		queue:                NewRequestQueue(),
 		pendingRequests:      make(map[string]chan *protocol.HTTPResponse),
 		pendingErrors:        make(map[string]chan error),
-		pushNotificationChan: make(chan PushNotification, 100), // Buffered channel for 100 notifications
+		pushNotificationChan: make(chan PushNotification, 100),
 		logger:               slog.Default(),
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -83,25 +81,26 @@ func NewSimpleClient(config Config) (*SimpleClient, error) {
 	return client, nil
 }
 
-// SetLogger sets the logger for the client
-func (c *SimpleClient) SetLogger(logger *slog.Logger) {
+// SetLogger configures a custom logger for the client.
+// By default, the client uses slog.Default().
+func (c *Client) SetLogger(logger *slog.Logger) {
 	c.logger = logger
 }
 
-// Connect establishes the XMPP connection
-func (c *SimpleClient) Connect(ctx context.Context) error {
+// Connect establishes the XMPP connection and starts background workers.
+// The connection uses STARTTLS (plain TCP upgraded to TLS) as required by Bosch servers.
+func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Info("connecting to Nefit Easy backend",
 		"host", c.config.Host,
 		"jid", c.config.JID())
 
-	// Setup XMPP options
-	// Bosch servers use STARTTLS (start with plain TCP, then upgrade to TLS)
+	// Bosch servers require STARTTLS (plain TCP → TLS upgrade), not direct TLS
 	options := xmpp.Options{
 		Host:     fmt.Sprintf("%s:%d", c.config.Host, c.config.Port),
 		User:     c.config.JID(),
 		Password: c.config.AuthPassword(),
-		NoTLS:    true,  // Start with plain TCP
-		StartTLS: true,  // Then upgrade with STARTTLS
+		NoTLS:    true,
+		StartTLS: true,
 		TLSConfig: &tls.Config{
 			ServerName: c.config.Host,
 			MinVersion: tls.VersionTLS12,
@@ -109,7 +108,6 @@ func (c *SimpleClient) Connect(ctx context.Context) error {
 		InsecureAllowUnencryptedAuth: false,
 	}
 
-	// Create XMPP client
 	xmppClient, err := options.NewClient()
 	if err != nil {
 		return fmt.Errorf("failed to create XMPP client: %w", err)
@@ -121,7 +119,6 @@ func (c *SimpleClient) Connect(ctx context.Context) error {
 
 	c.logger.Info("connected to Nefit Easy backend")
 
-	// Start background workers
 	c.wg.Add(3)
 	go c.pingWorker()
 	go c.receiveWorker()
@@ -130,14 +127,13 @@ func (c *SimpleClient) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close disconnects from the XMPP server and cleans up resources
-func (c *SimpleClient) Close() error {
+// Close disconnects from the XMPP server and cleans up resources.
+// It gracefully shuts down all background workers and drains any pending push notifications.
+func (c *Client) Close() error {
 	c.logger.Info("closing Nefit Easy client")
 
-	// Cancel context to stop workers
 	c.cancel()
 
-	// Close XMPP connection
 	c.connMu.Lock()
 	if c.xmppClient != nil {
 		c.xmppClient.Close()
@@ -145,13 +141,9 @@ func (c *SimpleClient) Close() error {
 	}
 	c.connMu.Unlock()
 
-	// Close push notification channel (workers will drain remaining messages)
 	close(c.pushNotificationChan)
 
-	// Wait for workers to finish
 	c.wg.Wait()
-
-	// Close queue
 	c.queue.Close()
 
 	c.logger.Info("Nefit Easy client closed")
@@ -159,15 +151,14 @@ func (c *SimpleClient) Close() error {
 	return nil
 }
 
-// IsConnected returns true if the client is connected
-func (c *SimpleClient) IsConnected() bool {
+// IsConnected checks whether the client currently has an active XMPP connection.
+func (c *Client) IsConnected() bool {
 	c.connMu.RLock()
 	defer c.connMu.RUnlock()
 	return c.xmppClient != nil
 }
 
-// pingWorker sends periodic keepalive pings
-func (c *SimpleClient) pingWorker() {
+func (c *Client) pingWorker() {
 	defer c.wg.Done()
 
 	ticker := time.NewTicker(c.config.PingInterval)
@@ -185,8 +176,7 @@ func (c *SimpleClient) pingWorker() {
 	}
 }
 
-// sendPing sends a presence stanza to keep the connection alive
-func (c *SimpleClient) sendPing() error {
+func (c *Client) sendPing() error {
 	c.connMu.RLock()
 	client := c.xmppClient
 	c.connMu.RUnlock()
@@ -204,8 +194,7 @@ func (c *SimpleClient) sendPing() error {
 	return nil
 }
 
-// receiveWorker listens for incoming XMPP messages
-func (c *SimpleClient) receiveWorker() {
+func (c *Client) receiveWorker() {
 	defer c.wg.Done()
 
 	for {
@@ -222,8 +211,7 @@ func (c *SimpleClient) receiveWorker() {
 	}
 }
 
-// pushNotificationWorker processes queued push notifications
-func (c *SimpleClient) pushNotificationWorker() {
+func (c *Client) pushNotificationWorker() {
 	defer c.wg.Done()
 
 	for {
@@ -244,8 +232,7 @@ func (c *SimpleClient) pushNotificationWorker() {
 	}
 }
 
-// drainPushNotifications processes all remaining queued notifications
-func (c *SimpleClient) drainPushNotifications() {
+func (c *Client) drainPushNotifications() {
 	for {
 		select {
 		case notification, ok := <-c.pushNotificationChan:
@@ -254,27 +241,24 @@ func (c *SimpleClient) drainPushNotifications() {
 			}
 			c.dispatchPushNotification(notification)
 		default:
-			// No more messages
 			return
 		}
 	}
 }
 
-// dispatchPushNotification calls all registered event handlers for a notification
-func (c *SimpleClient) dispatchPushNotification(notification PushNotification) {
+func (c *Client) dispatchPushNotification(notification PushNotification) {
 	c.eventHandlersMu.RLock()
 	handlers := make([]EventHandler, len(c.eventHandlers))
 	copy(handlers, c.eventHandlers)
 	c.eventHandlersMu.RUnlock()
 
-	// Call each handler in its own goroutine
+	// Each handler runs concurrently to avoid blocking on slow handlers
 	for _, handler := range handlers {
 		go handler(notification.URI, notification.Data)
 	}
 }
 
-// receiveMessage processes one incoming XMPP message
-func (c *SimpleClient) receiveMessage() error {
+func (c *Client) receiveMessage() error {
 	c.connMu.RLock()
 	client := c.xmppClient
 	c.connMu.RUnlock()
@@ -303,8 +287,7 @@ func (c *SimpleClient) receiveMessage() error {
 	}
 }
 
-// handleChatMessage processes an incoming chat message
-func (c *SimpleClient) handleChatMessage(msg xmpp.Chat) error {
+func (c *Client) handleChatMessage(msg xmpp.Chat) error {
 	c.logger.Debug("received chat message", "from", msg.Remote, "type", msg.Type)
 
 	if msg.Type == "error" {
@@ -313,7 +296,6 @@ func (c *SimpleClient) handleChatMessage(msg xmpp.Chat) error {
 		return nil
 	}
 
-	// Parse HTTP response from message body
 	if msg.Text != "" {
 		resp, err := protocol.ParseHTTPResponse(msg.Text)
 		if err != nil {
@@ -340,18 +322,17 @@ func (c *SimpleClient) handleChatMessage(msg xmpp.Chat) error {
 	return nil
 }
 
-// Subscribe adds an event handler for backend push notifications
-func (c *SimpleClient) Subscribe(handler EventHandler) {
+// Subscribe registers an event handler that will be called when the backend
+// sends unsolicited push notifications. Multiple handlers can be registered.
+func (c *Client) Subscribe(handler EventHandler) {
 	c.eventHandlersMu.Lock()
 	defer c.eventHandlersMu.Unlock()
 	c.eventHandlers = append(c.eventHandlers, handler)
 }
 
-// handlePushNotification processes unsolicited messages from the backend
-func (c *SimpleClient) handlePushNotification(resp *protocol.HTTPResponse) {
+func (c *Client) handlePushNotification(resp *protocol.HTTPResponse) {
 	c.logger.Debug("received push notification", "status", resp.StatusCode)
 
-	// Decrypt response body if present
 	if resp.Body != "" && resp.StatusCode == 200 {
 		decrypted, err := c.encryptor.Decrypt(resp.Body)
 		if err != nil {
@@ -359,12 +340,11 @@ func (c *SimpleClient) handlePushNotification(resp *protocol.HTTPResponse) {
 			return
 		}
 
-		// Parse JSON if content type is application/json
 		var data interface{}
 		if resp.ContentType == "application/json" {
 			if err := json.Unmarshal([]byte(decrypted), &data); err != nil {
 				c.logger.Warn("failed to parse JSON push notification", "error", err, "data", decrypted)
-				data = decrypted // Fall back to raw string
+				data = decrypted
 			}
 		} else {
 			data = decrypted
@@ -380,10 +360,8 @@ func (c *SimpleClient) handlePushNotification(resp *protocol.HTTPResponse) {
 
 		c.logger.Info("push notification received", "uri", uri, "data", data)
 
-		// Queue the push notification for processing
 		select {
 		case c.pushNotificationChan <- PushNotification{URI: uri, Data: data}:
-			// Successfully queued
 		default:
 			// Channel full - log warning but don't block
 			c.logger.Warn("push notification queue full, dropping message", "uri", uri)
@@ -391,8 +369,7 @@ func (c *SimpleClient) handlePushNotification(resp *protocol.HTTPResponse) {
 	}
 }
 
-// notifyResponse sends a response to all waiting request handlers
-func (c *SimpleClient) notifyResponse(resp *protocol.HTTPResponse) {
+func (c *Client) notifyResponse(resp *protocol.HTTPResponse) {
 	c.pendingMu.RLock()
 	defer c.pendingMu.RUnlock()
 
@@ -404,8 +381,7 @@ func (c *SimpleClient) notifyResponse(resp *protocol.HTTPResponse) {
 	}
 }
 
-// notifyError sends an error to all waiting request handlers
-func (c *SimpleClient) notifyError(err error) {
+func (c *Client) notifyError(err error) {
 	c.pendingMu.RLock()
 	defer c.pendingMu.RUnlock()
 
@@ -417,8 +393,7 @@ func (c *SimpleClient) notifyError(err error) {
 	}
 }
 
-// sendMessage sends an XMPP message
-func (c *SimpleClient) sendMessage(msg string) error {
+func (c *Client) sendMessage(msg string) error {
 	c.connMu.RLock()
 	client := c.xmppClient
 	c.connMu.RUnlock()
@@ -427,7 +402,6 @@ func (c *SimpleClient) sendMessage(msg string) error {
 		return fmt.Errorf("not connected")
 	}
 
-	// Parse the message XML to extract to and body
 	var msgStanza struct {
 		To   string `xml:"to,attr"`
 		Body string `xml:"body"`
@@ -436,7 +410,6 @@ func (c *SimpleClient) sendMessage(msg string) error {
 		return fmt.Errorf("failed to parse message: %w", err)
 	}
 
-	// Send using the xmpp client's Send method
 	_, err := client.Send(xmpp.Chat{
 		Remote: msgStanza.To,
 		Type:   "chat",
@@ -445,13 +418,13 @@ func (c *SimpleClient) sendMessage(msg string) error {
 	return err
 }
 
-// Get performs a GET request to the specified URI
-func (c *SimpleClient) Get(ctx context.Context, uri string) (interface{}, error) {
+// Get performs a GET request to the specified URI and returns the decrypted response data.
+// The method automatically retries on timeout and deserializes JSON responses.
+func (c *Client) Get(ctx context.Context, uri string) (interface{}, error) {
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	// Execute request with retries
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -482,18 +455,14 @@ func (c *SimpleClient) Get(ctx context.Context, uri string) (interface{}, error)
 	return nil, fmt.Errorf("GET request failed after %d attempts: %w", c.config.MaxRetries, lastErr)
 }
 
-// executeGet performs the actual GET request
-func (c *SimpleClient) executeGet(ctx context.Context, uri string) (interface{}, error) {
-	// Build and send message
+func (c *Client) executeGet(ctx context.Context, uri string) (interface{}, error) {
 	msg := protocol.BuildGetMessage(c.config.JID(), c.config.ResourceJID(), uri)
 
 	c.logger.Debug("sending GET request", "uri", uri)
 
-	// Create response channels
 	responseCh := make(chan *protocol.HTTPResponse, 1)
 	errorCh := make(chan error, 1)
 
-	// Register for responses
 	reqID := fmt.Sprintf("get:%s:%d", uri, time.Now().UnixNano())
 	c.pendingMu.Lock()
 	c.pendingRequests[reqID] = responseCh
@@ -507,29 +476,25 @@ func (c *SimpleClient) executeGet(ctx context.Context, uri string) (interface{},
 		c.pendingMu.Unlock()
 	}()
 
-	// Send message
 	if err := c.sendMessage(msg); err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Wait for response
 	select {
 	case resp := <-responseCh:
 		if resp.StatusCode != 200 {
 			return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, resp.Status)
 		}
 
-		// Decrypt and parse
 		decrypted, err := c.encryptor.DecryptAndStrip(resp.Body)
 		if err != nil {
 			return nil, fmt.Errorf("decryption failed: %w", err)
 		}
 
-		// Try to parse as JSON
 		if strings.Contains(resp.ContentType, "json") {
 			var result interface{}
 			if err := json.Unmarshal([]byte(decrypted), &result); err != nil {
-				return decrypted, nil // Return as string if not valid JSON
+				return decrypted, nil
 			}
 			return result, nil
 		}
@@ -543,13 +508,14 @@ func (c *SimpleClient) executeGet(ctx context.Context, uri string) (interface{},
 	}
 }
 
-// Put performs a PUT request to the specified URI
-func (c *SimpleClient) Put(ctx context.Context, uri string, data interface{}) error {
+// Put performs a PUT request to the specified URI with the given data.
+// Data is automatically marshalled to JSON and encrypted before sending.
+// The method automatically retries on timeout.
+func (c *Client) Put(ctx context.Context, uri string, data interface{}) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected")
 	}
 
-	// Convert data to JSON
 	var jsonData string
 	switch v := data.(type) {
 	case string:
@@ -562,13 +528,11 @@ func (c *SimpleClient) Put(ctx context.Context, uri string, data interface{}) er
 		jsonData = string(jsonBytes)
 	}
 
-	// Encrypt the data
 	encrypted, err := c.encryptor.Encrypt(jsonData)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt data: %w", err)
 	}
 
-	// Execute request with retries
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -599,18 +563,14 @@ func (c *SimpleClient) Put(ctx context.Context, uri string, data interface{}) er
 	return fmt.Errorf("PUT request failed after %d attempts: %w", c.config.MaxRetries, lastErr)
 }
 
-// executePut performs the actual PUT request
-func (c *SimpleClient) executePut(ctx context.Context, uri, encryptedData string) error {
-	// Build and send message
+func (c *Client) executePut(ctx context.Context, uri, encryptedData string) error {
 	msg := protocol.BuildPutMessage(c.config.JID(), c.config.ResourceJID(), uri, encryptedData)
 
 	c.logger.Debug("sending PUT request", "uri", uri)
 
-	// Create response channels
 	responseCh := make(chan *protocol.HTTPResponse, 1)
 	errorCh := make(chan error, 1)
 
-	// Register for responses
 	reqID := fmt.Sprintf("put:%s:%d", uri, time.Now().UnixNano())
 	c.pendingMu.Lock()
 	c.pendingRequests[reqID] = responseCh
@@ -624,12 +584,10 @@ func (c *SimpleClient) executePut(ctx context.Context, uri, encryptedData string
 		c.pendingMu.Unlock()
 	}()
 
-	// Send message
 	if err := c.sendMessage(msg); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Wait for response
 	select {
 	case resp := <-responseCh:
 		if resp.StatusCode >= 300 {

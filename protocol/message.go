@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// HTTPResponse represents a parsed HTTP-over-XMPP response
+// HTTPResponse represents a parsed HTTP-over-XMPP response.
 type HTTPResponse struct {
 	StatusCode  int
 	Status      string
@@ -20,13 +20,13 @@ type HTTPResponse struct {
 	ContentType string
 }
 
-// BuildGetMessage creates an HTTP GET request formatted for XMPP
+// BuildGetMessage constructs an HTTP GET request wrapped in an XMPP message stanza.
 func BuildGetMessage(from, to, uri string) string {
 	body := fmt.Sprintf("GET %s HTTP/1.1\rUser-Agent: NefitEasy\r\r", uri)
 	return buildXMPPMessage(from, to, body)
 }
 
-// BuildPutMessage creates an HTTP PUT request formatted for XMPP
+// BuildPutMessage constructs an HTTP PUT request wrapped in an XMPP message stanza.
 func BuildPutMessage(from, to, uri string, encryptedData string) string {
 	body := fmt.Sprintf(
 		"PUT %s HTTP/1.1\r"+
@@ -42,7 +42,6 @@ func BuildPutMessage(from, to, uri string, encryptedData string) string {
 	return buildXMPPMessage(from, to, body)
 }
 
-// buildXMPPMessage wraps HTTP-style body in an XMPP message stanza
 func buildXMPPMessage(from, to, body string) string {
 	// Escape XML special characters in body, but preserve \r as &#13;\n for protocol
 	escapedBody := escapeXMLBody(body)
@@ -55,22 +54,18 @@ func buildXMPPMessage(from, to, body string) string {
 	)
 }
 
-// escapeXMLBody escapes XML content but preserves \r as &#13;\n
 func escapeXMLBody(body string) string {
-	// Replace \r with placeholder first
 	placeholder := "\x00CRLF\x00"
 	body = strings.ReplaceAll(body, "\r", placeholder)
 
-	// Escape XML
 	escaped := html.EscapeString(body)
 
-	// Replace placeholder with &#13;\n
 	escaped = strings.ReplaceAll(escaped, placeholder, "&#13;\n")
 
 	return escaped
 }
 
-// ParseHTTPResponse parses an HTTP-over-XMPP response
+// ParseHTTPResponse parses an HTTP-over-XMPP response.
 func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 	// Replace &#13; entities back to \r for HTTP parsing
 	data = strings.ReplaceAll(data, "&#13;", "\r")
@@ -78,7 +73,6 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 
 	reader := bufio.NewReader(strings.NewReader(data))
 
-	// Parse status line
 	statusLine, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("failed to read status line: %w", err)
@@ -100,7 +94,6 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 		status = parts[2]
 	}
 
-	// Parse headers
 	headers := make(map[string]string)
 	for {
 		line, err := reader.ReadString('\n')
@@ -110,10 +103,9 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 
 		line = strings.TrimSpace(line)
 		if line == "" {
-			break // End of headers
+			break
 		}
 
-		// Parse header
 		headerParts := strings.SplitN(line, ":", 2)
 		if len(headerParts) == 2 {
 			key := strings.TrimSpace(headerParts[0])
@@ -126,7 +118,6 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 		}
 	}
 
-	// Read body (rest of the data)
 	bodyBuf := new(bytes.Buffer)
 	if _, err := io.Copy(bodyBuf, reader); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("failed to read body: %w", err)
@@ -143,7 +134,7 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 	}, nil
 }
 
-// MessageStanza represents an XMPP message
+// MessageStanza represents an XMPP message.
 type MessageStanza struct {
 	XMLName xml.Name `xml:"message"`
 	From    string   `xml:"from,attr"`
@@ -152,14 +143,13 @@ type MessageStanza struct {
 	Body    string   `xml:"body"`
 }
 
-// ExtractBody extracts the body from an XMPP message XML string
+// ExtractBody extracts and decodes the body content from an XMPP message XML string.
 func ExtractBody(xmlData string) (string, error) {
 	var msg MessageStanza
 	if err := xml.Unmarshal([]byte(xmlData), &msg); err != nil {
 		return "", fmt.Errorf("failed to unmarshal message: %w", err)
 	}
 
-	// Decode HTML entities
 	body := msg.Body
 	body = strings.ReplaceAll(body, "&#13;", "\r")
 
