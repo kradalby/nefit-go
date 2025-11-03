@@ -136,7 +136,7 @@ func (c *Client) Close() error {
 
 	c.connMu.Lock()
 	if c.xmppClient != nil {
-		c.xmppClient.Close()
+		_ = c.xmppClient.Close()
 		c.xmppClient = nil
 	}
 	c.connMu.Unlock()

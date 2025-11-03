@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"crypto/aes"
-	"crypto/cipher"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -119,32 +118,4 @@ func (e *Encryptor) DecryptAndStrip(data string) (string, error) {
 	}
 
 	return decrypted, nil
-}
-
-type ecb struct {
-	b         cipher.Block
-	blockSize int
-}
-
-func newECBEncrypter(b cipher.Block) cipher.BlockMode {
-	return &ecb{
-		b:         b,
-		blockSize: b.BlockSize(),
-	}
-}
-
-func (x *ecb) BlockSize() int { return x.blockSize }
-
-func (x *ecb) CryptBlocks(dst, src []byte) {
-	if len(src)%x.blockSize != 0 {
-		panic("crypto/cipher: input not full blocks")
-	}
-	if len(dst) < len(src) {
-		panic("crypto/cipher: output smaller than input")
-	}
-	for len(src) > 0 {
-		x.b.Encrypt(dst, src[:x.blockSize])
-		src = src[x.blockSize:]
-		dst = dst[x.blockSize:]
-	}
 }

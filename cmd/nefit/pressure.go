@@ -21,7 +21,7 @@ Example:
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer c.Close() //nolint:errcheck
 
 		if err := connectClient(c); err != nil {
 			return err

@@ -199,7 +199,7 @@ func getFloat(m map[string]interface{}, key string) float64 {
 			return float64(v)
 		case string:
 			var f float64
-			fmt.Sscanf(v, "%f", &f)
+			_, _ = fmt.Sscanf(v, "%f", &f)
 			return f
 		}
 	}
@@ -219,7 +219,7 @@ func getInt(m map[string]interface{}, key string) int {
 			return int(v)
 		case string:
 			var i int
-			fmt.Sscanf(v, "%d", &i)
+			_, _ = fmt.Sscanf(v, "%d", &i)
 			return i
 		}
 	}

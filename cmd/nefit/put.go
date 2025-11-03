@@ -44,7 +44,7 @@ For simple values, you can also use:
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer c.Close() //nolint:errcheck
 
 		if err := connectClient(c); err != nil {
 			return err
