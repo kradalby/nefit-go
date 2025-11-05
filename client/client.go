@@ -146,7 +146,7 @@ func (c *Client) Close() error {
 	c.wg.Wait()
 	c.queue.Close()
 
-	c.logger.Info("Nefit Easy client closed")
+	c.logger.Info("closed Nefit Easy client")
 
 	return nil
 }
