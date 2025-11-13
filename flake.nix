@@ -20,6 +20,8 @@
             go-tools
             golangci-lint
             delve
+            prek
+            nixpkgs-fmt
           ];
 
           shellHook = ''
