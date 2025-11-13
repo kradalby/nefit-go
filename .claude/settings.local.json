@@ -8,7 +8,9 @@
       "Bash(nix develop:*)",
       "Bash(go test:*)",
       "Bash(go version:*)",
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []
