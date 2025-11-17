@@ -13,6 +13,12 @@ const (
 	URIHotWaterManualMode = "/dhwCircuits/dhwA/dhwOperationManualMode"
 
 	// User mode endpoints
+	// URIUserMode controls the heating operation mode.
+	// Valid values for PUT requests:
+	//   - "manual": Manual mode - user controls temperature directly
+	//   - "clock": Clock/scheduled mode - follows programmed heating schedule
+	// Note: "off" is NOT a valid mode value and will result in HTTP 400 Bad Request.
+	// To effectively disable heating, use manual mode with a low temperature setpoint.
 	URIUserMode = "/heatingCircuits/hc1/usermode"
 
 	// Temperature control endpoints

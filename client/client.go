@@ -36,9 +36,9 @@ type Client struct {
 	connMu     sync.RWMutex
 
 	// Backend limitation: only one concurrent request allowed, so we need request/response correlation
-	pendingRequests   map[string]chan *protocol.HTTPResponse
-	pendingErrors     map[string]chan error
-	pendingMu         sync.RWMutex
+	pendingRequests map[string]chan *protocol.HTTPResponse
+	pendingErrors   map[string]chan error
+	pendingMu       sync.RWMutex
 
 	eventHandlers        []EventHandler
 	eventHandlersMu      sync.RWMutex
@@ -510,7 +510,7 @@ func (c *Client) executeGet(ctx context.Context, uri string) (interface{}, error
 
 // Put performs a PUT request to the specified URI with the given data.
 // Data is automatically marshalled to JSON and encrypted before sending.
-// The method automatically retries on timeout.
+// The method uses exponential backoff for retries on transient errors.
 func (c *Client) Put(ctx context.Context, uri string, data interface{}) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected")
@@ -528,24 +528,56 @@ func (c *Client) Put(ctx context.Context, uri string, data interface{}) error {
 		jsonData = string(jsonBytes)
 	}
 
+	c.logger.Debug("PUT request data prepared",
+		"uri", uri,
+		"json_data", jsonData,
+		"json_length", len(jsonData))
+
 	encrypted, err := c.encryptor.Encrypt(jsonData)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt data: %w", err)
 	}
 
+	c.logger.Debug("PUT request encrypted",
+		"uri", uri,
+		"encrypted_length", len(encrypted))
+
 	var lastErr error
+	backoff := c.config.RetryTimeout
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			c.logger.Debug("retrying PUT request", "uri", uri, "attempt", attempt)
+			c.logger.Debug("retrying PUT request",
+				"uri", uri,
+				"attempt", attempt,
+				"backoff", backoff,
+				"last_error", lastErr)
+
+			// Exponential backoff: wait before retrying
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+
+			// Double the backoff for next attempt, up to 30 seconds
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, c.config.RetryTimeout)
 		_, err := c.queue.Submit(reqCtx, func() (interface{}, error) {
-			return nil, c.executePut(reqCtx, uri, encrypted)
+			return nil, c.executePut(reqCtx, uri, encrypted, jsonData)
 		})
 		cancel()
 
 		if err == nil {
+			if attempt > 0 {
+				c.logger.Info("PUT request succeeded after retry",
+					"uri", uri,
+					"attempts", attempt+1)
+			}
 			return nil
 		}
 
@@ -555,18 +587,28 @@ func (c *Client) Put(ctx context.Context, uri string, data interface{}) error {
 			break
 		}
 
-		if err != context.DeadlineExceeded {
+		// Only retry on timeout errors - 400 Bad Request indicates invalid data
+		if err != context.DeadlineExceeded && !strings.Contains(err.Error(), "timeout") {
+			c.logger.Warn("PUT request failed with non-retryable error",
+				"uri", uri,
+				"error", err,
+				"json_data", jsonData)
 			break
 		}
 	}
 
-	return fmt.Errorf("PUT request failed after %d attempts: %w", c.config.MaxRetries, lastErr)
+	return fmt.Errorf("PUT request failed after %d attempts: %w", c.config.MaxRetries+1, lastErr)
 }
 
-func (c *Client) executePut(ctx context.Context, uri, encryptedData string) error {
+func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData string) error {
 	msg := protocol.BuildPutMessage(c.config.JID(), c.config.ResourceJID(), uri, encryptedData)
 
-	c.logger.Debug("sending PUT request", "uri", uri)
+	c.logger.Debug("sending PUT request",
+		"uri", uri,
+		"from", c.config.JID(),
+		"to", c.config.ResourceJID(),
+		"encrypted_payload_length", len(encryptedData),
+		"decrypted_json", jsonData)
 
 	responseCh := make(chan *protocol.HTTPResponse, 1)
 	errorCh := make(chan error, 1)
@@ -591,8 +633,16 @@ func (c *Client) executePut(ctx context.Context, uri, encryptedData string) erro
 	select {
 	case resp := <-responseCh:
 		if resp.StatusCode >= 300 {
+			c.logger.Error("PUT request failed",
+				"uri", uri,
+				"status_code", resp.StatusCode,
+				"status", resp.Status,
+				"json_data", jsonData)
 			return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, resp.Status)
 		}
+		c.logger.Debug("PUT request successful",
+			"uri", uri,
+			"status_code", resp.StatusCode)
 		return nil
 	case err := <-errorCh:
 		return err

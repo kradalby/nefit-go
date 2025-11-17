@@ -113,16 +113,46 @@ func (c *Client) SetTemperature(ctx context.Context, temperature float64) error 
 }
 
 // SetUserMode switches between "manual" and "clock" (scheduled) heating modes.
+//
+// Valid mode values:
+//   - "manual": Manual heating mode - user controls temperature directly
+//   - "clock": Clock/scheduled mode - follows programmed heating schedule
+//
+// Note: The API does NOT accept "off" as a mode value. To turn off heating,
+// use manual mode and set a low temperature, or disable hot water supply.
 func (c *Client) SetUserMode(ctx context.Context, mode string) error {
-	if mode != "manual" && mode != "clock" {
-		return fmt.Errorf("invalid mode: %s (must be 'manual' or 'clock')", mode)
+	validModes := []string{"manual", "clock"}
+
+	// Validate mode
+	isValid := false
+	for _, valid := range validModes {
+		if mode == valid {
+			isValid = true
+			break
+		}
+	}
+
+	if !isValid {
+		return fmt.Errorf("invalid mode: %q (valid values are: 'manual', 'clock'). Note: 'off' is not a valid mode", mode)
 	}
 
 	data := map[string]string{
 		"value": mode,
 	}
 
-	return c.Put(ctx, types.URIUserMode, data)
+	c.logger.Debug("setting user mode",
+		"mode", mode,
+		"uri", types.URIUserMode)
+
+	if err := c.Put(ctx, types.URIUserMode, data); err != nil {
+		c.logger.Error("failed to set user mode",
+			"mode", mode,
+			"error", err)
+		return err
+	}
+
+	c.logger.Info("user mode set successfully", "mode", mode)
+	return nil
 }
 
 // SetHotWaterSupply enables or disables hot water supply.
