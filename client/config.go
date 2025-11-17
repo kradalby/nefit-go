@@ -16,7 +16,7 @@ const (
 	RRCGatewayPrefix = "rrcgateway_"
 
 	DefaultPingInterval = 30 * time.Second
-	DefaultMaxRetries   = 15
+	DefaultMaxRetries   = 3 // Reduced from 15 - we now use exponential backoff
 	DefaultRetryTimeout = 2 * time.Second
 )
 

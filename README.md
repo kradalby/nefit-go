@@ -106,6 +106,50 @@ err := client.Put(ctx, "/heatingCircuits/hc1/temperatureRoomManual", map[string]
 })
 ```
 
+## Debugging
+
+### Enable Debug Logging
+
+The library uses Go's standard `log/slog` package. To see detailed request/response information:
+
+```go
+import "log/slog"
+import "os"
+
+// Create a logger with debug level
+logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+    Level: slog.LevelDebug,
+}))
+
+// Set it on the client
+client.SetLogger(logger)
+```
+
+Debug logs include:
+- Exact JSON payloads being sent (decrypted)
+- Encrypted payload lengths
+- HTTP status codes and responses
+- Retry attempts with backoff timing
+- Full error context
+
+### Common Issues
+
+**Problem: HTTP 400 Bad Request on SetUserMode**
+
+The API only accepts `"manual"` or `"clock"` as valid mode values. **`"off"` is NOT valid** and will cause a 400 error.
+
+To turn off heating, use:
+```go
+client.SetUserMode(ctx, "manual")
+client.SetTemperature(ctx, 5.0) // Set minimum temperature
+```
+
+**See [API_NOTES.md](API_NOTES.md)** for comprehensive documentation on:
+- Valid values for all endpoints
+- Retry behavior and exponential backoff
+- Troubleshooting common errors
+- Production recommendations
+
 ## Disclaimer
 
 This library is based on reverse-engineering the Nefit Easy communications protocol. It is **not** officially supported by Bosch, Nefit, or any related companies.
