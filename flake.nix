@@ -45,7 +45,7 @@
           version = "0.1.0";
           src = ./.;
 
-          vendorHash = null; # Will be updated after go mod vendor
+          vendorHash = "sha256-eBzCJMRygFjzmeg9Wd5EBh1AQ4Z8mhnDilMcXQvE+QA=";
 
           env = {
             CGO_ENABLED = "0";
