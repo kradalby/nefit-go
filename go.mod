@@ -1,6 +1,6 @@
 module github.com/kradalby/nefit-go
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/peterbourgon/ff/v3 v3.4.0
