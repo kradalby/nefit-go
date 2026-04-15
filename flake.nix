@@ -14,7 +14,7 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            go_1_25
+            go_1_26
             gopls
             gotools
             go-tools
@@ -36,7 +36,7 @@
           CGO_ENABLED = "0";
 
           # Go environment
-          GOROOT = "${pkgs.go_1_25}/share/go";
+          GOROOT = "${pkgs.go_1_26}/share/go";
         };
 
         # Package definition (for building)
