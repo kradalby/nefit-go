@@ -54,8 +54,8 @@ func TestPaddingCompatibility(t *testing.T) {
 		plaintext string
 	}{
 		{"exact_block", "0123456789abcdef"}, // Exactly 16 bytes
-		{"needs_padding", "test"},            // Needs padding
-		{"empty", ""},                        // Empty string
+		{"needs_padding", "test"},           // Needs padding
+		{"empty", ""},                       // Empty string
 		{"long", "this is a longer test string that spans multiple blocks"}, // Multiple blocks
 	}
 
@@ -73,7 +73,7 @@ func TestPaddingCompatibility(t *testing.T) {
 			}
 
 			// Verify encrypted length is multiple of 16 (AES block size)
-			if len(decoded) % 16 != 0 {
+			if len(decoded)%16 != 0 {
 				t.Errorf("Encrypted data length (%d) is not multiple of 16", len(decoded))
 			}
 

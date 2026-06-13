@@ -4,14 +4,43 @@
   inputs = {
     nixpkgs.url = "nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    flake-checks.url = "github:kradalby/flake-checks";
+    flake-checks.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    { self
+    , nixpkgs
+    , flake-utils
+    , flake-checks
+    , ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        fc = flake-checks.lib;
+        common = {
+          inherit pkgs;
+          root = ./.;
+          pname = "nefit-go";
+          version = "0.1.0";
+          vendorHash = "sha256-eBzCJMRygFjzmeg9Wd5EBh1AQ4Z8mhnDilMcXQvE+QA=";
+          goPkg = pkgs.go_1_26;
+        };
       in
       {
+        packages.default = fc.goBuild common;
+
+        formatter = fc.formatter common;
+
+        checks = {
+          build = fc.goBuild common;
+          gotest = fc.goTest common;
+          golangci-lint = fc.goLint common;
+          formatting = fc.goFormat common;
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             go_1_26
@@ -37,32 +66,6 @@
 
           # Go environment
           GOROOT = "${pkgs.go_1_26}/share/go";
-        };
-
-        # Package definition (for building)
-        packages.default = pkgs.buildGoModule {
-          pname = "nefit-go";
-          version = "0.1.0";
-          src = ./.;
-
-          vendorHash = "sha256-eBzCJMRygFjzmeg9Wd5EBh1AQ4Z8mhnDilMcXQvE+QA=";
-
-          env = {
-            CGO_ENABLED = "0";
-          };
-
-          ldflags = [
-            "-s"
-            "-w"
-            "-extldflags=-static"
-          ];
-
-          meta = with pkgs.lib; {
-            description = "Go library for Nefit Easy smart thermostats";
-            homepage = "https://github.com/kradalby/nefit-go";
-            license = licenses.mit;
-            maintainers = [ ];
-          };
         };
       }
     );

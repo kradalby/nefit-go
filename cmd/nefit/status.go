@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	statusFlagSet       = flag.NewFlagSet("status", flag.ExitOnError)
-	statusSkipOutdoor   = statusFlagSet.Bool("skip-outdoor", false, "Skip fetching outdoor temperature")
+	statusFlagSet     = flag.NewFlagSet("status", flag.ExitOnError)
+	statusSkipOutdoor = statusFlagSet.Bool("skip-outdoor", false, "Skip fetching outdoor temperature")
 )
 
 var statusCmd = &ffcli.Command{

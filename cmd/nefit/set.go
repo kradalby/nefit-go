@@ -10,9 +10,7 @@ import (
 	"github.com/peterbourgon/ff/v3/ffcli"
 )
 
-var (
-	setFlagSet = flag.NewFlagSet("set", flag.ExitOnError)
-)
+var setFlagSet = flag.NewFlagSet("set", flag.ExitOnError)
 
 var setCmd = &ffcli.Command{
 	Name:       "set",

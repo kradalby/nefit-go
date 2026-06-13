@@ -14,13 +14,13 @@ import (
 
 var (
 	// Global flags
-	rootFlagSet    = flag.NewFlagSet("nefit", flag.ExitOnError)
-	serialNumber   = rootFlagSet.String("serial", os.Getenv("NEFIT_SERIAL_NUMBER"), "Serial number (or NEFIT_SERIAL_NUMBER env)")
-	accessKey      = rootFlagSet.String("access-key", os.Getenv("NEFIT_ACCESS_KEY"), "Access key (or NEFIT_ACCESS_KEY env)")
-	password       = rootFlagSet.String("password", os.Getenv("NEFIT_PASSWORD"), "Password (or NEFIT_PASSWORD env)")
-	timeout        = rootFlagSet.Duration("timeout", 30*time.Second, "Request timeout")
-	pretty         = rootFlagSet.Bool("pretty", false, "Pretty-print JSON output")
-	verbose        = rootFlagSet.Bool("verbose", false, "Verbose output")
+	rootFlagSet  = flag.NewFlagSet("nefit", flag.ExitOnError)
+	serialNumber = rootFlagSet.String("serial", os.Getenv("NEFIT_SERIAL_NUMBER"), "Serial number (or NEFIT_SERIAL_NUMBER env)")
+	accessKey    = rootFlagSet.String("access-key", os.Getenv("NEFIT_ACCESS_KEY"), "Access key (or NEFIT_ACCESS_KEY env)")
+	password     = rootFlagSet.String("password", os.Getenv("NEFIT_PASSWORD"), "Password (or NEFIT_PASSWORD env)")
+	timeout      = rootFlagSet.Duration("timeout", 30*time.Second, "Request timeout")
+	pretty       = rootFlagSet.Bool("pretty", false, "Pretty-print JSON output")
+	verbose      = rootFlagSet.Bool("verbose", false, "Verbose output")
 )
 
 func main() {
