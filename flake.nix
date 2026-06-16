@@ -25,7 +25,7 @@
           root = ./.;
           pname = "nefit-go";
           version = "0.1.0";
-          vendorHash = "sha256-eBzCJMRygFjzmeg9Wd5EBh1AQ4Z8mhnDilMcXQvE+QA=";
+          vendorHash = "sha256-gJ4bC6Cqygje4NW+T4+2POct25Awr3HzdlJEJqpyxd4=";
           goPkg = pkgs.go_1_26;
         };
       in
