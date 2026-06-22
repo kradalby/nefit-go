@@ -74,4 +74,6 @@ tags
 *-temp/
 /nefit
 result
-.envrc
+result-*
+.envrc.local
+.claude/settings.local.json
