@@ -171,4 +171,3 @@ This Go implementation is based on and inspired by the JavaScript libraries by [
 ## License
 
 MIT License - see LICENSE file for details.
-

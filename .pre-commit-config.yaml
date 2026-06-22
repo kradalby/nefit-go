@@ -27,25 +27,32 @@ repos:
   # Local hooks for project-specific tooling
   - repo: local
     hooks:
-      # nixpkgs-fmt for Nix files
-      - id: nixpkgs-fmt
-        name: nixpkgs-fmt
-        entry: nixpkgs-fmt
-        language: system
-        files: \.nix$
-
-      # golangci-lint for Go code quality
       - id: golangci-lint
         name: golangci-lint
-        entry: golangci-lint run --new-from-rev=HEAD~1 ./...
+        entry: golangci-lint run --new-from-rev=HEAD~1 --fix
         language: system
         types: [go]
         pass_filenames: false
 
-      # go mod tidy
+      - id: go-test
+        name: go test
+        entry: go test -short -timeout=5m ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
       - id: go-mod-tidy
         name: go mod tidy
         entry: go mod tidy
         language: system
         files: ^go\.(mod|sum)$
+        pass_filenames: false
+
+      # Format (treefmt via fc.formatter) + build are enforced through the
+      # repo's own checks; gated on flake/go changes.
+      - id: nix-build-checks
+        name: nix build checks
+        entry: bash -c 'nix build --fallback .#checks.x86_64-linux.build .#checks.x86_64-linux.golangci-lint .#checks.x86_64-linux.formatting'
+        language: system
+        files: ^(flake\.(nix|lock)|go\.(mod|sum))$
         pass_filenames: false

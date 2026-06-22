@@ -49,7 +49,7 @@ client.SetLogger(logger)
 
 **Problem:** The API was receiving `"off"` as a user mode value, which is invalid and results in HTTP 400 Bad Request errors.
 
-**Solution:** 
+**Solution:**
 
 - Added explicit validation in `SetUserMode()` to reject invalid modes before sending to API
 - Improved error messages to clearly state valid values: `"manual"` and `"clock"`
@@ -97,14 +97,14 @@ client.SetHotWaterSupply(ctx, false)
 **Retry Timeline:**
 - Attempt 1: Immediate
 - Attempt 2: After 2 seconds
-- Attempt 3: After 4 seconds  
+- Attempt 3: After 4 seconds
 - Attempt 4: After 8 seconds
 
 **Smart Retry Logic:**
 - **WILL retry:** Timeout errors and transient network failures
 - **WON'T retry:** HTTP 400 (invalid data), 404 (not found), 500+ (server errors)
 
-**Rationale:** 
+**Rationale:**
 - 400 errors mean the request format/values are wrong - retrying the same invalid request will never succeed
 - Exponential backoff gives transient issues time to resolve
 - Fewer retries with backoff is more efficient than many immediate retries
