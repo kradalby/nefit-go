@@ -142,9 +142,17 @@ func (c *Client) Close() error {
 	}
 	c.connMu.Unlock()
 
+	// Wait for the workers to stop before closing the channel they send on.
+	// receiveWorker feeds pushNotificationChan via handlePushNotification, so
+	// closing it here — while that goroutine may still be in flight — raced to
+	// a "send on closed channel" panic. The select/default at the send site
+	// does not help: sending on a closed channel panics rather than taking the
+	// default branch. pushNotificationWorker exits on ctx.Done() and drains
+	// what is left, so the close is only for tidiness and can safely wait.
+	c.wg.Wait()
+
 	close(c.pushNotificationChan)
 
-	c.wg.Wait()
 	c.queue.Close()
 
 	c.logger.Info("closed Nefit Easy client")
