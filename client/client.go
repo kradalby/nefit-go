@@ -335,7 +335,13 @@ func (c *Client) handlePushNotification(resp *protocol.HTTPResponse) {
 	c.logger.Debug("received push notification", "status", resp.StatusCode)
 
 	if resp.Body != "" && resp.StatusCode == 200 {
-		decrypted, err := c.encryptor.Decrypt(resp.Body)
+		// DecryptAndStrip, not Decrypt: AES-ECB pads the plaintext out to a
+		// block boundary with NUL bytes. Leaving them on made the JSON parse
+		// below fail on every notification ("invalid character '\x00' after
+		// top-level value"), so data fell back to the raw padded string, the
+		// map[string]any assertion never succeeded, and every event was
+		// dispatched with an empty URI. The GET path already strips them.
+		decrypted, err := c.encryptor.DecryptAndStrip(resp.Body)
 		if err != nil {
 			c.logger.Error("failed to decrypt push notification", "error", err)
 			return
