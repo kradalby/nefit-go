@@ -46,12 +46,12 @@ Example:
 		fmt.Println()
 
 		// Subscribe to all events
-		c.Subscribe(func(uri string, data interface{}) {
+		c.Subscribe(func(uri string, data any) {
 			timestamp := time.Now().Format("15:04:05")
 
 			if *pretty {
 				// Pretty print JSON
-				jsonData, err := json.MarshalIndent(map[string]interface{}{
+				jsonData, err := json.MarshalIndent(map[string]any{
 					"timestamp": timestamp,
 					"uri":       uri,
 					"data":      data,

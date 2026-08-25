@@ -11,18 +11,19 @@ import (
 	"sync"
 	"time"
 
+	xmpp "github.com/xmppo/go-xmpp"
+
 	"github.com/kradalby/nefit-go/crypto"
 	"github.com/kradalby/nefit-go/protocol"
-	xmpp "github.com/xmppo/go-xmpp"
 )
 
 // EventHandler is called when unsolicited messages are received from the backend
-type EventHandler func(uri string, data interface{})
+type EventHandler func(uri string, data any)
 
 // PushNotification represents a queued push notification
 type PushNotification struct {
 	URI  string
-	Data interface{}
+	Data any
 }
 
 // Client represents an active connection to the Nefit Easy backend.
@@ -340,7 +341,7 @@ func (c *Client) handlePushNotification(resp *protocol.HTTPResponse) {
 			return
 		}
 
-		var data interface{}
+		var data any
 		if resp.ContentType == "application/json" {
 			if err := json.Unmarshal([]byte(decrypted), &data); err != nil {
 				c.logger.Warn("failed to parse JSON push notification", "error", err, "data", decrypted)
@@ -352,7 +353,7 @@ func (c *Client) handlePushNotification(resp *protocol.HTTPResponse) {
 
 		// Extract URI from the data if possible (the response might contain an 'id' field with the URI)
 		uri := ""
-		if dataMap, ok := data.(map[string]interface{}); ok {
+		if dataMap, ok := data.(map[string]any); ok {
 			if id, ok := dataMap["id"].(string); ok {
 				uri = id
 			}
@@ -420,7 +421,7 @@ func (c *Client) sendMessage(msg string) error {
 
 // Get performs a GET request to the specified URI and returns the decrypted response data.
 // The method automatically retries on timeout and deserializes JSON responses.
-func (c *Client) Get(ctx context.Context, uri string) (interface{}, error) {
+func (c *Client) Get(ctx context.Context, uri string) (any, error) {
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -432,7 +433,7 @@ func (c *Client) Get(ctx context.Context, uri string) (interface{}, error) {
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, c.config.RetryTimeout)
-		result, err := c.queue.Submit(reqCtx, func() (interface{}, error) {
+		result, err := c.queue.Submit(reqCtx, func() (any, error) {
 			return c.executeGet(reqCtx, uri)
 		})
 		cancel()
@@ -455,7 +456,7 @@ func (c *Client) Get(ctx context.Context, uri string) (interface{}, error) {
 	return nil, fmt.Errorf("GET request failed after %d attempts: %w", c.config.MaxRetries, lastErr)
 }
 
-func (c *Client) executeGet(ctx context.Context, uri string) (interface{}, error) {
+func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 	msg := protocol.BuildGetMessage(c.config.JID(), c.config.ResourceJID(), uri)
 
 	c.logger.Debug("sending GET request", "uri", uri)
@@ -492,7 +493,7 @@ func (c *Client) executeGet(ctx context.Context, uri string) (interface{}, error
 		}
 
 		if strings.Contains(resp.ContentType, "json") {
-			var result interface{}
+			var result any
 			if err := json.Unmarshal([]byte(decrypted), &result); err != nil {
 				return decrypted, nil
 			}
@@ -511,7 +512,7 @@ func (c *Client) executeGet(ctx context.Context, uri string) (interface{}, error
 // Put performs a PUT request to the specified URI with the given data.
 // Data is automatically marshalled to JSON and encrypted before sending.
 // The method uses exponential backoff for retries on transient errors.
-func (c *Client) Put(ctx context.Context, uri string, data interface{}) error {
+func (c *Client) Put(ctx context.Context, uri string, data any) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected")
 	}
@@ -567,7 +568,7 @@ func (c *Client) Put(ctx context.Context, uri string, data interface{}) error {
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, c.config.RetryTimeout)
-		_, err := c.queue.Submit(reqCtx, func() (interface{}, error) {
+		_, err := c.queue.Submit(reqCtx, func() (any, error) {
 			return nil, c.executePut(reqCtx, uri, encrypted, jsonData)
 		})
 		cancel()

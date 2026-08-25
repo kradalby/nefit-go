@@ -35,7 +35,7 @@ For simple values, you can also use:
 		jsonData := args[1]
 
 		// Parse JSON to validate it
-		var data interface{}
+		var data any
 		if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
 			return fmt.Errorf("invalid JSON data: %w", err)
 		}

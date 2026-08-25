@@ -81,10 +81,10 @@ type SetTemperatureResult struct {
 
 // RawResponse wraps generic API responses for endpoints without specific types.
 type RawResponse struct {
-	Value         interface{} `json:"value"`
-	Type          string      `json:"type,omitempty"`
-	UnitOfMeasure string      `json:"unitOfMeasure,omitempty"`
-	MinValue      interface{} `json:"minValue,omitempty"`
-	MaxValue      interface{} `json:"maxValue,omitempty"`
-	SrcType       string      `json:"srcType,omitempty"`
+	Value         any    `json:"value"`
+	Type          string `json:"type,omitempty"`
+	UnitOfMeasure string `json:"unitOfMeasure,omitempty"`
+	MinValue      any    `json:"minValue,omitempty"`
+	MaxValue      any    `json:"maxValue,omitempty"`
+	SrcType       string `json:"srcType,omitempty"`
 }
