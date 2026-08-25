@@ -77,7 +77,7 @@
             golangci-lint
             delve
             prek
-            nixpkgs-fmt
+            nixfmt
           ];
 
           shellHook = ''
