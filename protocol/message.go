@@ -79,19 +79,15 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 	}
 
 	statusLine = strings.TrimSpace(statusLine)
-	parts := strings.SplitN(statusLine, " ", 3)
-	if len(parts) < 2 {
+	_, rest, ok := strings.Cut(statusLine, " ")
+	if !ok {
 		return nil, fmt.Errorf("invalid status line: %s", statusLine)
 	}
 
-	statusCode, err := strconv.Atoi(parts[1])
+	codeStr, status, _ := strings.Cut(rest, " ")
+	statusCode, err := strconv.Atoi(codeStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid status code: %s", parts[1])
-	}
-
-	status := ""
-	if len(parts) == 3 {
-		status = parts[2]
+		return nil, fmt.Errorf("invalid status code: %s", codeStr)
 	}
 
 	headers := make(map[string]string)
@@ -106,11 +102,8 @@ func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 			break
 		}
 
-		headerParts := strings.SplitN(line, ":", 2)
-		if len(headerParts) == 2 {
-			key := strings.TrimSpace(headerParts[0])
-			value := strings.TrimSpace(headerParts[1])
-			headers[key] = value
+		if key, value, ok := strings.Cut(line, ":"); ok {
+			headers[strings.TrimSpace(key)] = strings.TrimSpace(value)
 		}
 
 		if err == io.EOF {
