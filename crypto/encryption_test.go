@@ -161,8 +161,7 @@ func BenchmarkEncrypt(b *testing.B) {
 	enc, _ := NewEncryptor("123456789", "abcdefghij", "secret")
 	plaintext := `{"temperature":21.5,"status":"on","mode":"manual"}`
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := enc.Encrypt(plaintext)
 		if err != nil {
 			b.Fatal(err)
@@ -175,8 +174,7 @@ func BenchmarkDecrypt(b *testing.B) {
 	plaintext := `{"temperature":21.5,"status":"on","mode":"manual"}`
 	encrypted, _ := enc.Encrypt(plaintext)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := enc.Decrypt(encrypted)
 		if err != nil {
 			b.Fatal(err)
