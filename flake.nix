@@ -19,7 +19,28 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        # The Go dev tools that treefmt drives must be built against the same
+        # Go as the module itself. goimports (from `gotools`) ships wrapped
+        # with a `go` on PATH; if that `go` is older than the go.mod
+        # directive, GOTOOLCHAIN=auto tries to fetch a toolchain from inside
+        # the network-less treefmt sandbox and the `formatting` check fails.
+        # buildGoLatestModule / go_latest keep this future-proof: bare
+        # `pkgs.go` and `pkgs.buildGoModule` still resolve to the previous
+        # stable (1.26), so both must be named explicitly.
+        goOverlay = _: prev: {
+          gotools = prev.gotools.override {
+            buildGoModule = prev.buildGoLatestModule;
+            go = prev.go_latest;
+          };
+          gofumpt = prev.gofumpt.override {
+            buildGoModule = prev.buildGoLatestModule;
+          };
+        };
+
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ goOverlay ];
+        };
         fc = flake-checks.lib;
         common = {
           inherit pkgs;
@@ -27,7 +48,11 @@
           pname = "nefit-go";
           version = "0.1.0";
           vendorHash = "sha256-gJ4bC6Cqygje4NW+T4+2POct25Awr3HzdlJEJqpyxd4=";
-          goPkg = pkgs.go_1_26;
+          # go_latest, not bare `pkgs.go`: the latter still resolves to the
+          # previous stable (1.26) in nixpkgs. flake-checks feeds this to
+          # `buildGoModule.override { go = goPkg; }`, so this is the single
+          # knob that pins every check to the newest Go.
+          goPkg = pkgs.go_latest;
         };
       in
       {
@@ -44,7 +69,7 @@
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            go_1_26
+            go_latest
             gopls
             gotools
             go-tools
@@ -66,7 +91,7 @@
           CGO_ENABLED = "0";
 
           # Go environment
-          GOROOT = "${pkgs.go_1_26}/share/go";
+          GOROOT = "${pkgs.go_latest}/share/go";
         };
       }
     );
