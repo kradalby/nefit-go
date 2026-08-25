@@ -8,12 +8,12 @@ import (
 
 type requestItem struct {
 	ctx      context.Context
-	execute  func() (interface{}, error)
+	execute  func() (any, error)
 	resultCh chan requestResult
 }
 
 type requestResult struct {
-	value interface{}
+	value any
 	err   error
 }
 
@@ -58,7 +58,7 @@ func (q *RequestQueue) worker() {
 }
 
 // Submit queues a request for execution and blocks until it completes or the context is cancelled.
-func (q *RequestQueue) Submit(ctx context.Context, fn func() (interface{}, error)) (interface{}, error) {
+func (q *RequestQueue) Submit(ctx context.Context, fn func() (any, error)) (any, error) {
 	resultCh := make(chan requestResult, 1)
 
 	req := requestItem{

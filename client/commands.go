@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/kradalby/nefit-go/types"
 )
@@ -15,12 +16,12 @@ func (c *Client) Status(ctx context.Context, includeOutdoorTemp bool) (*types.St
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
 
-	statusMap, ok := statusData.(map[string]interface{})
+	statusMap, ok := statusData.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected status response type: %T", statusData)
 	}
 
-	valueMap, ok := statusMap["value"].(map[string]interface{})
+	valueMap, ok := statusMap["value"].(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("status response missing 'value' field")
 	}
@@ -54,7 +55,7 @@ func (c *Client) Status(ctx context.Context, includeOutdoorTemp bool) (*types.St
 	if includeOutdoorTemp {
 		outdoorData, err := c.Get(ctx, types.URIOutdoorTemp)
 		if err == nil {
-			if outdoorMap, ok := outdoorData.(map[string]interface{}); ok {
+			if outdoorMap, ok := outdoorData.(map[string]any); ok {
 				status.OutdoorTemp = getFloat(outdoorMap, "value")
 				status.OutdoorSourceType = getString(outdoorMap, "srcType")
 			}
@@ -72,7 +73,7 @@ func (c *Client) Pressure(ctx context.Context) (*types.Pressure, error) {
 		return nil, fmt.Errorf("failed to get pressure: %w", err)
 	}
 
-	dataMap, ok := data.(map[string]interface{})
+	dataMap, ok := data.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected pressure response type: %T", data)
 	}
@@ -90,7 +91,7 @@ func (c *Client) Pressure(ctx context.Context) (*types.Pressure, error) {
 // SetTemperature sets the manual temperature setpoint and enables manual override mode.
 // This requires three separate API calls to fully configure the temperature override.
 func (c *Client) SetTemperature(ctx context.Context, temperature float64) error {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"value": temperature,
 	}
 
@@ -124,13 +125,7 @@ func (c *Client) SetUserMode(ctx context.Context, mode string) error {
 	validModes := []string{"manual", "clock"}
 
 	// Validate mode
-	isValid := false
-	for _, valid := range validModes {
-		if mode == valid {
-			isValid = true
-			break
-		}
-	}
+	isValid := slices.Contains(validModes, mode)
 
 	if !isValid {
 		return fmt.Errorf("invalid mode: %q (valid values are: 'manual', 'clock'). Note: 'off' is not a valid mode", mode)
@@ -198,7 +193,7 @@ func (c *Client) HotWaterSupply(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("failed to get hot water supply: %w", err)
 	}
 
-	dataMap, ok := data.(map[string]interface{})
+	dataMap, ok := data.(map[string]any)
 	if !ok {
 		return false, fmt.Errorf("unexpected response type: %T", data)
 	}
@@ -207,7 +202,7 @@ func (c *Client) HotWaterSupply(ctx context.Context) (bool, error) {
 	return value == "on", nil
 }
 
-func getString(m map[string]interface{}, key string) string {
+func getString(m map[string]any, key string) string {
 	if val, ok := m[key]; ok {
 		if str, ok := val.(string); ok {
 			return str
@@ -216,7 +211,7 @@ func getString(m map[string]interface{}, key string) string {
 	return ""
 }
 
-func getFloat(m map[string]interface{}, key string) float64 {
+func getFloat(m map[string]any, key string) float64 {
 	if val, ok := m[key]; ok {
 		switch v := val.(type) {
 		case float64:
@@ -236,7 +231,7 @@ func getFloat(m map[string]interface{}, key string) float64 {
 	return 0
 }
 
-func getInt(m map[string]interface{}, key string) int {
+func getInt(m map[string]any, key string) int {
 	if val, ok := m[key]; ok {
 		switch v := val.(type) {
 		case int:

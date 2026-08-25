@@ -76,7 +76,7 @@ func main() {
 	// Example 4: Raw PUT to demonstrate what debug logging shows
 	fmt.Println("\n=== Example 4: Raw PUT Request ===")
 	fmt.Println("Setting temperature to 20.5°C using raw Put()...")
-	data := map[string]interface{}{
+	data := map[string]any{
 		"value": 20.5,
 	}
 	if err := c.Put(ctx, "/heatingCircuits/hc1/temperatureRoomManual", data); err != nil {

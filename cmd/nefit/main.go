@@ -8,8 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/kradalby/nefit-go/client"
 	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/kradalby/nefit-go/client"
 )
 
 var (
@@ -88,7 +89,7 @@ func createClient() (*client.Client, error) {
 	return client.NewClient(config)
 }
 
-func printJSON(v interface{}) error {
+func printJSON(v any) error {
 	var data []byte
 	var err error
 
