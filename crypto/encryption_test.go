@@ -1,6 +1,9 @@
 package crypto
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -179,5 +182,69 @@ func BenchmarkDecrypt(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// TestDecryptNonBlockMultipleLength guards the zero-padding in Decrypt.
+// Ciphertext length arrives off the wire, so a length that is not a whole
+// number of AES blocks must not panic the caller. Lengths 4, 20 and 24 all
+// used to panic with a slice-bounds error.
+func TestDecryptNonBlockMultipleLength(t *testing.T) {
+	enc, err := NewEncryptor("123456789", "abcdefghij", "secret")
+	if err != nil {
+		t.Fatalf("Failed to create encryptor: %v", err)
+	}
+
+	for _, n := range []int{1, 4, 8, 15, 16, 20, 24, 31, 33} {
+		data := base64.StdEncoding.EncodeToString(make([]byte, n))
+		if _, err := enc.Decrypt(data); err != nil {
+			t.Errorf("Decrypt(%d bytes) returned error: %v", n, err)
+		}
+	}
+}
+
+// TestDecryptAndStripRemovesPadding documents why the push-notification path
+// must use DecryptAndStrip: AES-ECB pads plaintext to a block boundary with
+// NUL bytes, and JSON parsing fails on the trailing NULs.
+func TestDecryptAndStripRemovesPadding(t *testing.T) {
+	enc, err := NewEncryptor("123456789", "abcdefghij", "secret")
+	if err != nil {
+		t.Fatalf("Failed to create encryptor: %v", err)
+	}
+
+	// 14 bytes, so AES-ECB pads it out to 16.
+	plaintext := `{"value":21.5}`
+
+	encrypted, err := enc.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+
+	padded, err := enc.Decrypt(encrypted)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	if padded == plaintext {
+		t.Skip("plaintext happened to land on a block boundary; nothing to strip")
+	}
+	if !strings.HasPrefix(padded, plaintext) {
+		t.Fatalf("Decrypt() = %q, want it to start with %q", padded, plaintext)
+	}
+
+	stripped, err := enc.DecryptAndStrip(encrypted)
+	if err != nil {
+		t.Fatalf("DecryptAndStrip() error: %v", err)
+	}
+	if stripped != plaintext {
+		t.Errorf("DecryptAndStrip() = %q, want %q", stripped, plaintext)
+	}
+
+	// The padded form is what broke JSON parsing before the fix.
+	var v any
+	if err := json.Unmarshal([]byte(padded), &v); err == nil {
+		t.Error("expected NUL-padded plaintext to fail JSON parsing")
+	}
+	if err := json.Unmarshal([]byte(stripped), &v); err != nil {
+		t.Errorf("stripped plaintext should parse as JSON, got: %v", err)
 	}
 }

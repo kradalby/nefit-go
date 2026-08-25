@@ -89,11 +89,16 @@ func (e *Encryptor) Decrypt(data string) (string, error) {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}
 
-	// Add zero-padding if needed (from JS implementation)
-	paddingLength := len(ciphertext) % 8
-	if paddingLength != 0 {
-		padding := make([]byte, paddingLength)
-		ciphertext = append(ciphertext, padding...)
+	// Add zero-padding if needed (from JS implementation).
+	//
+	// The loop below decrypts aes.BlockSize (16) bytes at a time, so the buffer
+	// must be a whole number of blocks. Padding to a multiple of 8, by the
+	// remainder rather than the shortfall, left lengths such as 4, 20 and 24
+	// short of a full block and panicked with a slice-bounds error on the last
+	// iteration. Ciphertext length comes off the wire, so malformed device or
+	// network data could crash the caller.
+	if rem := len(ciphertext) % aes.BlockSize; rem != 0 {
+		ciphertext = append(ciphertext, make([]byte, aes.BlockSize-rem)...)
 	}
 
 	plaintext := make([]byte, len(ciphertext))
