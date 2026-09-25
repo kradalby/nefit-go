@@ -49,7 +49,7 @@
           root = ./.;
           pname = "nefit-go";
           version = "0.1.0";
-          vendorHash = "sha256-+BIvF8EX10Nefc93JvaoSSd5BHN0rUFoI3+2bLVYTzw=";
+          vendorHash = "sha256-M4KFewgVbQCm8Zr+yU5Y08V/kkmcaq/HWASPUtW/Zww=";
           # go_latest, not bare `pkgs.go`: the latter still resolves to the
           # previous stable (1.26) in nixpkgs. flake-checks feeds this to
           # `buildGoModule.override { go = goPkg; }`, so this is the single
