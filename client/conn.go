@@ -30,7 +30,7 @@ type conn struct {
 	xmpp transport
 
 	// ctx is cancelled when the session is retired: the stream failed, the
-	// client closed, or a request went unanswered.
+	// client closed, or a request failed after it may have gone out.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -98,15 +98,6 @@ func (cn *conn) begin(p *pending) {
 	cn.mu.Lock()
 	defer cn.mu.Unlock()
 	cn.inflight = p
-}
-
-// end clears p after a failed send, which leaves no reply due.
-func (cn *conn) end(p *pending) {
-	cn.mu.Lock()
-	defer cn.mu.Unlock()
-	if cn.inflight == p {
-		cn.inflight = nil
-	}
 }
 
 // match claims the in-flight request r answers, if any.

@@ -163,13 +163,16 @@ func TestConnectTimeoutBoundsHandshake(t *testing.T) {
 	}
 }
 
-func TestCloseWithStalledPeer(t *testing.T) {
+// stalledClient returns a client whose session's writes block: the peer
+// stopped reading and the socket buffers are full.
+func stalledClient(t *testing.T) *Client {
+	t.Helper()
+
 	c := xmppClient(t, stalledServer(t), Config{})
 	if err := c.Connect(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	// Fill the socket buffers until a write blocks.
 	cn := c.conn.Load()
 	var sent atomic.Int64
 	go func() {
@@ -186,9 +189,29 @@ func TestCloseWithStalledPeer(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	return c
+}
+
+func TestCloseWithStalledPeer(t *testing.T) {
+	c := stalledClient(t)
+
 	closed := make(chan error, 1)
 	go func() { closed <- c.Close() }()
 	if err := wait(t, closed); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRequestGivesUpOnStalledWrite(t *testing.T) {
+	c := stalledClient(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	got := make(chan error, 1)
+	go func() { got <- c.Put(ctx, "/x", "y") }()
+	if err := wait(t, got); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Put = %v, want deadline exceeded", err)
+	}
+	// Aborting the write takes the session, freeing the queue behind it.
+	wait(t, c.Done())
 }

@@ -215,7 +215,7 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 
 - The client owns connecting. A request with no live session logs in on its own; `Connect()` does the same ahead of time, which is what lets push notifications arrive before the first request.
 - One login runs at a time. Requests and `Connect()` calls that need a session meanwhile wait for it rather than start another. A caller that gives up does not abort it; `ConnectTimeout` (default 30s) and `Close()` do.
-- `Done()` is closed when the session ends: the stream fails, `Close()` is called, or a request goes unanswered. To keep pushes flowing, wait on `Done()` and call `Connect()` again, with backoff.
+- `Done()` is closed when the session ends: the stream fails, `Close()` is called, or a request fails after it may have gone out. To keep pushes flowing, wait on `Done()` and call `Connect()` again, with backoff.
 - `Connect()` returning nil means a session was established; it may already have ended, so watch `Done()` rather than assume it is up.
 - A half-open connection (the peer vanished without closing) is noticed only when a request goes unanswered, or when the kernel gives up retransmitting a keepalive presence, which takes minutes. There is no read deadline; pushes stop silently until then. Poll with a request to notice sooner.
 - go-xmpp reaches the backend through an in-process loopback relay, so its sockets can be closed mid-handshake. Proxy environment variables do not apply to the backend connection, and `HTTP_PROXY` must exempt `127.0.0.1` through `NO_PROXY`.
