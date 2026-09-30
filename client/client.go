@@ -188,7 +188,8 @@ func (c *Client) dialBackend(ctx context.Context) (transport, error) {
 
 // Close disconnects from the XMPP server, stops background workers and waits
 // for running push handlers, so a handler must not call it. It is safe to
-// call more than once.
+// call more than once. It can hang on a connection go-xmpp dialled itself;
+// see "Known limits" in API_NOTES.md.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.logger.Info("closing Nefit Easy client")

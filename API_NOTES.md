@@ -217,7 +217,14 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 - `Done()` is closed when the session ends: the stream fails, `Close()` is called, or a request fails after it may have gone out. To keep pushes flowing, wait on `Done()` and call `Connect()` again, with backoff.
 - `Connect()` returning nil means a session was established; it may already have ended, so watch `Done()` rather than assume it is up.
 - A half-open connection (the peer vanished without closing) is noticed only when a request goes unanswered, or when the kernel gives up retransmitting a keepalive presence, which takes minutes. There is no read deadline; pushes stop silently until then. Poll with a request to notice sooner.
-- go-xmpp reaches the backend through an in-process loopback relay, so its sockets can be closed mid-handshake. Proxy environment variables do not apply to the backend connection, and `HTTP_PROXY` must exempt `127.0.0.1` through `NO_PROXY`.
+- go-xmpp reaches the backend through an in-process loopback relay, so its sockets can be closed mid-handshake. This is what bounds a login by `ConnectTimeout` and lets `Close()` always return.
+
+### Known limits
+
+go-xmpp dials on its own in two cases. Those sockets bypass the relay: they have no timeout and `Close()` cannot abort them, so a login may outlast `ConnectTimeout` and `Close()` may never return.
+
+- **Proxy variables.** With `HTTP_PROXY` (or `http_proxy`) set, go-xmpp sends the relay connection through that proxy unless `NO_PROXY` matches `127.0.0.1`. Whenever `HTTP_PROXY` is set, include `127.0.0.1` in `NO_PROXY`. The backend connection never uses a proxy, so a backend reachable only through one is unsupported.
+- **XMPP redirects.** A `<see-other-host>` stream error after STARTTLS makes go-xmpp dial the named host itself, inside TLS where the relay cannot intercept it. Redirects are unsupported. The Bosch backend is not known to send them; this is unverified.
 
 ## Production Recommendations
 
