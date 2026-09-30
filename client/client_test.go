@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,6 +27,11 @@ type fakeTransport struct {
 	closed chan struct{}
 	once   sync.Once
 	recvs  atomic.Int64
+
+	// stall blocks sends until Close, as a peer that stopped reading would.
+	stall atomic.Bool
+	// failNext delivers the next send, then reports it failed.
+	failNext atomic.Bool
 
 	mu  sync.Mutex
 	err error
@@ -66,12 +72,19 @@ func (f *fakeTransport) Recv() (any, error) {
 }
 
 func (f *fakeTransport) Send(chat xmpp.Chat) (int, error) {
+	if f.stall.Load() {
+		<-f.closed
+		return 0, net.ErrClosed
+	}
 	select {
 	case <-f.closed:
 		return 0, net.ErrClosed
 	case f.sent <- chat:
-		return len(chat.Text), nil
 	}
+	if f.failNext.Swap(false) {
+		return 0, syscall.EPIPE
+	}
+	return len(chat.Text), nil
 }
 
 func (f *fakeTransport) SendPresence(xmpp.Presence) (int, error) { return 0, nil }
@@ -430,6 +443,46 @@ func TestRetryIgnoresLateReply(t *testing.T) {
 	if got := valueOf(t, wait(t, res)); got != "fresh" {
 		t.Errorf("value = %v, want fresh", got)
 	}
+}
+
+func TestFailedSendRetiresSession(t *testing.T) {
+	h := newHarness(t, Config{})
+	f1 := h.connect(t)
+
+	// The write errors after the request reached the peer.
+	f1.failNext.Store(true)
+	if r := wait(t, h.get(t.Context(), types.URIStatus)); r.err == nil {
+		t.Fatal("Get succeeded on a failed send")
+	}
+	f1.request(t)
+
+	res := h.get(t.Context(), types.URIStatus)
+	f1.in <- h.reply(t, types.URIStatus, "stale")
+	f2 := wait(t, h.dials)
+	f2.request(t)
+	f2.in <- h.reply(t, types.URIStatus, "fresh")
+
+	if got := valueOf(t, wait(t, res)); got != "fresh" {
+		t.Errorf("value = %v, want fresh", got)
+	}
+}
+
+func TestStalledSendDoesNotBlockLaterRequests(t *testing.T) {
+	h := newHarness(t, Config{})
+	f1 := h.connect(t)
+
+	f1.stall.Store(true)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if r := wait(t, h.get(ctx, types.URIStatus)); r.err == nil {
+		t.Fatal("Get succeeded with a stalled write")
+	}
+
+	res := h.get(t.Context(), types.URIOutdoorTemp)
+	f2 := wait(t, h.dials)
+	f2.request(t)
+	f2.in <- h.reply(t, types.URIOutdoorTemp, 1.0)
+	valueOf(t, wait(t, res))
 }
 
 func TestRequestReconnectsAfterLoss(t *testing.T) {

@@ -219,9 +219,9 @@ func (c *Client) IsConnected() bool {
 }
 
 // Done returns a channel that is closed when the current connection ends:
-// the stream fails, the client is closed, or a request goes unanswered, since
-// its late reply would pass for the answer to the next one. Without a
-// connection it is already closed.
+// the stream fails, the client is closed, or a request fails after it may
+// have gone out, since its late reply would pass for the answer to the next
+// one. Without a connection it is already closed.
 func (c *Client) Done() <-chan struct{} {
 	if cn := c.conn.Load(); cn != nil {
 		return cn.ctx.Done()
@@ -377,11 +377,16 @@ func (c *Client) route(cn *conn, r reply) {
 // session is read once: a reply can only arrive on the stream the request
 // went out on.
 func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (reply, error) {
+	chat, err := chatOf(msg)
+	if err != nil {
+		return reply{}, err
+	}
+
 	cn, err := c.session(ctx)
 	if err != nil {
 		return reply{}, err
 	}
-	// Unsent, an expired request costs nothing; sent, it retires the session.
+	// Unsent, an expired request costs nothing.
 	if err := ctx.Err(); err != nil {
 		return reply{}, err
 	}
@@ -391,8 +396,18 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 	p := &pending{uri: uri, get: get, reply: make(chan reply, 1)}
 	cn.begin(p)
 
-	if err := c.sendMessage(cn, msg); err != nil {
-		cn.end(p)
+	// From here the request may reach the backend, whose replies carry no
+	// request id: if it fails, its late reply would pass for the answer to
+	// the next, so the session goes with it. Closing also aborts a write the
+	// peer stopped reading.
+	stop := context.AfterFunc(ctx, cn.close)
+	defer stop()
+
+	if _, err := cn.xmpp.Send(chat); err != nil {
+		cn.close()
+		if err := ctx.Err(); err != nil {
+			return reply{}, err
+		}
 		return reply{}, fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -400,30 +415,23 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 	case r := <-p.reply:
 		return r, r.err
 	case <-cn.ctx.Done():
+		if err := ctx.Err(); err != nil {
+			return reply{}, err
+		}
 		return reply{}, errConnectionLost
-	case <-ctx.Done():
-		// Replies carry no request id, so the stream can no longer tell this
-		// request's late reply from the answer to the next.
-		cn.close()
-		return reply{}, ctx.Err()
 	}
 }
 
-func (c *Client) sendMessage(cn *conn, msg string) error {
-	var msgStanza struct {
+// chatOf unwraps the message stanza protocol builds, for go-xmpp to rewrap.
+func chatOf(msg string) (xmpp.Chat, error) {
+	var stanza struct {
 		To   string `xml:"to,attr"`
 		Body string `xml:"body"`
 	}
-	if err := xml.Unmarshal([]byte(msg), &msgStanza); err != nil {
-		return fmt.Errorf("failed to parse message: %w", err)
+	if err := xml.Unmarshal([]byte(msg), &stanza); err != nil {
+		return xmpp.Chat{}, fmt.Errorf("failed to parse message: %w", err)
 	}
-
-	_, err := cn.xmpp.Send(xmpp.Chat{
-		Remote: msgStanza.To,
-		Type:   "chat",
-		Text:   msgStanza.Body,
-	})
-	return err
+	return xmpp.Chat{Remote: stanza.To, Type: "chat", Text: stanza.Body}, nil
 }
 
 // Get performs a GET request to the specified URI and returns the decrypted response data.
