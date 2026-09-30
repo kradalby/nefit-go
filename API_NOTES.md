@@ -216,7 +216,7 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 
 **Solution:**
 - Call `Connect()` before making requests
-- `Done()` is closed when the connection drops; call `Connect()` again to reconnect
+- `Done()` is closed when the connection drops or a request times out; call `Connect()` again to reconnect (requests also reconnect on their own)
 
 ## Production Recommendations
 

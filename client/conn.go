@@ -30,12 +30,10 @@ var closedChan = func() chan struct{} {
 type conn struct {
 	xmpp transport
 
-	// ctx is cancelled when the session is torn down.
+	// ctx is cancelled when the session is retired: the stream failed, the
+	// client closed, or a request went unanswered.
 	ctx    context.Context
 	cancel context.CancelFunc
-
-	// done is closed by the reader when the stream fails or is closed.
-	done chan struct{}
 
 	closeOnce sync.Once
 
@@ -43,10 +41,6 @@ type conn struct {
 	// inflight is the request awaiting a reply; the backend serves one at
 	// a time.
 	inflight *pending
-	// abandoned counts GETs per resource whose caller gave up before the
-	// reply came. A reply that never comes, or comes without an id, costs
-	// one push for that resource until the session ends.
-	abandoned map[string]int
 }
 
 // reply is a decoded backend response.
@@ -86,26 +80,14 @@ func resource(uri string) string {
 
 func newConn(parent context.Context, t transport) *conn {
 	ctx, cancel := context.WithCancel(parent)
-	return &conn{
-		xmpp:   t,
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
-
-		abandoned: make(map[string]int),
-	}
+	return &conn{xmpp: t, ctx: ctx, cancel: cancel}
 }
 
 func (cn *conn) alive() bool {
-	select {
-	case <-cn.done:
-		return false
-	default:
-		return true
-	}
+	return cn.ctx.Err() == nil
 }
 
-// close tears the session down; the blocked reader then fails and closes done.
+// close retires the session; the blocked reader then fails and exits.
 // The transport closes in the background: go-xmpp's graceful close takes the
 // stream lock, which a failed read can leave held, and would block forever.
 // Its own timer still drops the socket.
@@ -122,32 +104,23 @@ func (cn *conn) begin(p *pending) {
 	cn.inflight = p
 }
 
-// end clears p unless a reply already claimed it. An abandoned GET is
-// remembered so its late reply is not taken for a push notification.
-func (cn *conn) end(p *pending, abandoned bool) {
+// end clears p after a failed send, which leaves no reply due.
+func (cn *conn) end(p *pending) {
 	cn.mu.Lock()
 	defer cn.mu.Unlock()
-	if cn.inflight != p {
-		return
-	}
-	cn.inflight = nil
-	if abandoned && p.get {
-		cn.abandoned[resource(p.uri)]++
+	if cn.inflight == p {
+		cn.inflight = nil
 	}
 }
 
-// match claims the in-flight request r answers. Failing that, late reports
-// whether r answers a request its caller already abandoned.
-func (cn *conn) match(r reply) (p *pending, late bool) {
+// match claims the in-flight request r answers, if any.
+func (cn *conn) match(r reply) *pending {
 	cn.mu.Lock()
 	defer cn.mu.Unlock()
-	if p := cn.inflight; p != nil && p.answeredBy(r) {
-		cn.inflight = nil
-		return p, false
+	p := cn.inflight
+	if p == nil || !p.answeredBy(r) {
+		return nil
 	}
-	if id := resource(r.id); id != "" && cn.abandoned[id] > 0 {
-		cn.abandoned[id]--
-		return nil, true
-	}
-	return nil, false
+	cn.inflight = nil
+	return p
 }
