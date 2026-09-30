@@ -5,16 +5,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	xmpp "github.com/xmppo/go-xmpp"
 
@@ -29,15 +27,6 @@ type EventHandler func(uri string, data any)
 type PushNotification struct {
 	URI  string
 	Data any
-}
-
-// transport is the subset of *xmpp.Client the client relies on, so tests can
-// drive the client without a server. Close must not wait on the peer.
-type transport interface {
-	Recv() (any, error)
-	Send(xmpp.Chat) (int, error)
-	SendPresence(xmpp.Presence) (int, error)
-	Close() error
 }
 
 // Client represents an active connection to the Nefit Easy backend.
@@ -86,7 +75,7 @@ func NewClient(config Config) (*Client, error) {
 		ctx:       ctx,
 		cancel:    cancel,
 	}
-	client.dial = client.dialXMPP
+	client.dial = client.dialBackend
 
 	return client, nil
 }
@@ -150,10 +139,9 @@ func (c *Client) publish(t transport) (bool, error) {
 	return true, nil
 }
 
-func (c *Client) dialXMPP(context.Context) (transport, error) {
+func (c *Client) dialBackend(ctx context.Context) (transport, error) {
 	// Bosch servers require STARTTLS (plain TCP → TLS upgrade), not direct TLS
 	options := xmpp.Options{
-		Host:     fmt.Sprintf("%s:%d", c.config.Host, c.config.Port),
 		User:     c.config.JID(),
 		Password: c.config.AuthPassword(),
 		NoTLS:    true,
@@ -165,49 +153,7 @@ func (c *Client) dialXMPP(context.Context) (transport, error) {
 		InsecureAllowUnencryptedAuth: false,
 	}
 
-	return newXMPPTransport(options)
-}
-
-func newXMPPTransport(options xmpp.Options) (transport, error) {
-	xmppClient, err := options.NewClient()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create XMPP client: %w", err)
-	}
-
-	sock := socketOf(xmppClient)
-	if sock == nil {
-		go func() { _ = xmppClient.Close() }()
-		return nil, errors.New("go-xmpp: socket not found")
-	}
-
-	return &xmppTransport{Client: xmppClient, sock: sock}, nil
-}
-
-// xmppTransport closes by dropping the socket. go-xmpp's graceful Close
-// writes the stream end before arming its timeout and takes the stream lock a
-// failed read can leave held; either blocks it, and the reader, forever.
-type xmppTransport struct {
-	*xmpp.Client
-	sock net.Conn
-}
-
-func (t *xmppTransport) Close() error {
-	return t.sock.Close()
-}
-
-// socketOf digs out the connection go-xmpp keeps unexported, or returns nil
-// if its layout changed.
-func socketOf(c *xmpp.Client) net.Conn {
-	f := reflect.ValueOf(c).Elem().FieldByName("conn")
-	if !f.IsValid() || f.Type() != reflect.TypeFor[net.Conn]() {
-		return nil
-	}
-	conn, _ := reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Interface().(net.Conn)
-	if tc, ok := conn.(*tls.Conn); ok {
-		// Below TLS: closing a TLS conn first tries to send an alert.
-		return tc.NetConn()
-	}
-	return conn
+	return dialXMPP(ctx, net.JoinHostPort(c.config.Host, strconv.Itoa(c.config.Port)), options)
 }
 
 // Close disconnects from the XMPP server, stops background workers and waits
