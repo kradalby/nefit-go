@@ -88,13 +88,10 @@ func (cn *conn) alive() bool {
 }
 
 // close retires the session; the blocked reader then fails and exits.
-// The transport closes in the background: go-xmpp's graceful close takes the
-// stream lock, which a failed read can leave held, and would block forever.
-// Its own timer still drops the socket.
 func (cn *conn) close() {
 	cn.closeOnce.Do(func() {
 		cn.cancel()
-		go func() { _ = cn.xmpp.Close() }()
+		_ = cn.xmpp.Close()
 	})
 }
 
