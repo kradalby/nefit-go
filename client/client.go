@@ -95,7 +95,7 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 
 // Connect establishes the XMPP connection and starts background workers.
 // It is a no-op while connected. Once Done is closed, call Connect again to
-// reconnect.
+// reconnect; requests also reconnect on their own.
 func (c *Client) Connect(ctx context.Context) error {
 	if c.IsConnected() {
 		return nil
@@ -202,11 +202,13 @@ func (c *Client) IsConnected() bool {
 	return cn != nil && cn.alive()
 }
 
-// Done returns a channel that is closed when the current connection is lost
-// or the client is closed. Without a connection it is already closed.
+// Done returns a channel that is closed when the current connection ends:
+// the stream fails, the client is closed, or a request goes unanswered, since
+// its late reply would pass for the answer to the next one. Without a
+// connection it is already closed.
 func (c *Client) Done() <-chan struct{} {
 	if cn := c.conn.Load(); cn != nil {
-		return cn.done
+		return cn.ctx.Done()
 	}
 	return closedChan
 }
@@ -236,14 +238,15 @@ func (c *Client) pingWorker(cn *conn) {
 func (c *Client) receiveWorker(cn *conn) {
 	defer c.wg.Done()
 	defer cn.close()
-	defer close(cn.done)
 
 	for {
 		stanza, err := cn.xmpp.Recv()
+		if cn.ctx.Err() != nil {
+			// Retired: whatever arrives now has no owner.
+			return
+		}
 		if err != nil {
-			if cn.ctx.Err() == nil {
-				c.logger.Error("connection lost", "error", err)
-			}
+			c.logger.Error("connection lost", "error", err)
 			return
 		}
 		c.handleStanza(cn, stanza)
@@ -336,15 +339,10 @@ func (c *Client) decode(resp *protocol.HTTPResponse) reply {
 }
 
 // route hands r to the in-flight request if it can be its answer. Anything
-// else is a late reply to an abandoned request or a push notification.
+// else is a push notification.
 func (c *Client) route(cn *conn, r reply) {
-	p, late := cn.match(r)
-	if p != nil {
+	if p := cn.match(r); p != nil {
 		p.reply <- r
-		return
-	}
-	if late {
-		c.logger.Debug("dropping late reply", "uri", r.id)
 		return
 	}
 
@@ -366,9 +364,17 @@ func (c *Client) route(cn *conn, r reply) {
 // session is read once: a reply can only arrive on the stream the request
 // went out on.
 func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (reply, error) {
+	// A request that timed out ahead of this one retired its session.
+	if err := c.Connect(ctx); err != nil {
+		return reply{}, err
+	}
 	cn := c.conn.Load()
 	if cn == nil || !cn.alive() {
 		return reply{}, errNotConnected
+	}
+	// Unsent, an expired request costs nothing; sent, it retires the session.
+	if err := ctx.Err(); err != nil {
+		return reply{}, err
 	}
 
 	// The queue runs one request at a time, so the slot is free. Claim it
@@ -377,18 +383,19 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 	cn.begin(p)
 
 	if err := c.sendMessage(cn, msg); err != nil {
-		cn.end(p, false)
+		cn.end(p)
 		return reply{}, fmt.Errorf("failed to send message: %w", err)
 	}
 
 	select {
 	case r := <-p.reply:
 		return r, r.err
-	case <-cn.done:
-		cn.end(p, false)
+	case <-cn.ctx.Done():
 		return reply{}, errConnectionLost
 	case <-ctx.Done():
-		cn.end(p, true)
+		// Replies carry no request id, so the stream can no longer tell this
+		// request's late reply from the answer to the next.
+		cn.close()
 		return reply{}, ctx.Err()
 	}
 }

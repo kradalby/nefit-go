@@ -137,7 +137,7 @@ func (h *harness) connect(t *testing.T) *fakeTransport {
 	if err := h.c.Connect(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	return <-h.dials
+	return wait(t, h.dials)
 }
 
 // reply builds a gateway answer for uri: encrypted JSON carrying the
@@ -394,32 +394,62 @@ func TestReplyForOtherResourceIsNotTheAnswer(t *testing.T) {
 }
 
 func TestLateReplyIsNotAPush(t *testing.T) {
-	// Long enough for the queue to pick up the retry before it expires.
 	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond, MaxRetries: 1})
 	pushes := make(chan any, 8)
 	h.c.Subscribe(func(_ string, data any) {
 		pushes <- data.(map[string]any)["value"]
 	})
-	f := h.connect(t)
+	f1 := h.connect(t)
 
 	res := h.get(t.Context(), types.URIStatus)
-	f.request(t)
-	f.request(t)
+	f1.request(t)
+	f2 := wait(t, h.dials)
+	f2.request(t)
 	if r := wait(t, res); r.err == nil {
 		t.Fatal("Get succeeded without a reply")
 	}
 
 	// Both attempts are answered after their callers gave up.
-	f.in <- h.reply(t, types.URIStatus, "late")
-	f.in <- h.reply(t, types.URIStatus, "late")
-	f.in <- h.reply(t, types.URIStatus, "push")
+	f1.in <- h.reply(t, types.URIStatus, "late")
+	f2.in <- h.reply(t, types.URIStatus, "late")
 
+	// Get can return before the worker retires the session.
+	wait(t, h.c.Done())
+	f3 := h.connect(t)
+	f3.in <- h.reply(t, types.URIStatus, "push")
 	if got := wait(t, pushes); got != "push" {
 		t.Errorf("push = %v, want the real push", got)
 	}
 	_ = h.c.Close()
 	if n := len(pushes); n != 0 {
 		t.Errorf("%d late replies dispatched as pushes", n)
+	}
+}
+
+func TestRetryIgnoresLateReply(t *testing.T) {
+	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond, MaxRetries: 1})
+	f1 := h.connect(t)
+
+	res := h.get(t.Context(), types.URIStatus)
+	f1.request(t)
+
+	// The retry may go out on a fresh session.
+	f2 := f1
+	select {
+	case <-f1.sent:
+	case f2 = <-h.dials:
+		f2.request(t)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no retry sent")
+	}
+
+	// The first attempt's reply overtakes the retry's; both name the
+	// resource, and nothing else tells them apart.
+	f1.in <- h.reply(t, types.URIStatus, "stale")
+	f2.in <- h.reply(t, types.URIStatus, "fresh")
+
+	if got := valueOf(t, wait(t, res)); got != "fresh" {
+		t.Errorf("value = %v, want fresh", got)
 	}
 }
 
