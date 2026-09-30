@@ -2,9 +2,11 @@ package client
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 )
+
+var errQueueStopped = errors.New("queue is stopped")
 
 type requestItem struct {
 	ctx      context.Context
@@ -47,6 +49,14 @@ func (q *RequestQueue) worker() {
 		case <-q.stopCh:
 			return
 		case req := <-q.requestCh:
+			// select picks randomly when both are ready; Submit may already
+			// have reported the queue stopped.
+			select {
+			case <-q.stopCh:
+				return
+			default:
+			}
+
 			// The caller has given up; sending now would only leave an
 			// orphaned reply on the wire.
 			if req.ctx.Err() != nil {
@@ -78,7 +88,7 @@ func (q *RequestQueue) Submit(ctx context.Context, fn func() (any, error)) (any,
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-q.stopCh:
-		return nil, fmt.Errorf("queue is stopped")
+		return nil, errQueueStopped
 	}
 
 	select {
@@ -86,6 +96,8 @@ func (q *RequestQueue) Submit(ctx context.Context, fn func() (any, error)) (any,
 		return result.value, result.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-q.stopCh:
+		return nil, errQueueStopped
 	}
 }
 

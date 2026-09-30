@@ -20,7 +20,7 @@ import (
 // EventHandler is called when unsolicited messages are received from the backend
 type EventHandler func(uri string, data any)
 
-// PushNotification represents a queued push notification
+// PushNotification is an unsolicited update from the backend.
 type PushNotification struct {
 	URI  string
 	Data any
@@ -51,15 +51,15 @@ type Client struct {
 	pendingErrors   map[string]chan error
 	pendingMu       sync.RWMutex
 
-	eventHandlers        []EventHandler
-	eventHandlersMu      sync.RWMutex
-	pushNotificationChan chan PushNotification
+	eventHandlers   []EventHandler
+	eventHandlersMu sync.RWMutex
 
 	logger *slog.Logger
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // NewClient creates a new Nefit Easy client with the given configuration.
@@ -78,15 +78,14 @@ func NewClient(config Config) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client := &Client{
-		config:               config,
-		encryptor:            encryptor,
-		queue:                NewRequestQueue(),
-		pendingRequests:      make(map[string]chan *protocol.HTTPResponse),
-		pendingErrors:        make(map[string]chan error),
-		pushNotificationChan: make(chan PushNotification, 100),
-		logger:               slog.Default(),
-		ctx:                  ctx,
-		cancel:               cancel,
+		config:          config,
+		encryptor:       encryptor,
+		queue:           NewRequestQueue(),
+		pendingRequests: make(map[string]chan *protocol.HTTPResponse),
+		pendingErrors:   make(map[string]chan error),
+		logger:          slog.Default(),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 	client.dial = client.dialXMPP
 
@@ -117,10 +116,9 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.logger.Info("connected to Nefit Easy backend")
 
-	c.wg.Add(3)
+	c.wg.Add(2)
 	go c.pingWorker()
 	go c.receiveWorker()
-	go c.pushNotificationWorker()
 
 	return nil
 }
@@ -148,34 +146,28 @@ func (c *Client) dialXMPP(context.Context) (transport, error) {
 	return xmppClient, nil
 }
 
-// Close disconnects from the XMPP server and cleans up resources.
-// It gracefully shuts down all background workers and drains any pending push notifications.
+// Close disconnects from the XMPP server, stops background workers and waits
+// for running push handlers, so a handler must not call it. It is safe to
+// call more than once.
 func (c *Client) Close() error {
-	c.logger.Info("closing Nefit Easy client")
+	c.closeOnce.Do(func() {
+		c.logger.Info("closing Nefit Easy client")
 
-	c.cancel()
+		c.cancel()
 
-	c.connMu.Lock()
-	if c.xmppClient != nil {
-		_ = c.xmppClient.Close()
-		c.xmppClient = nil
-	}
-	c.connMu.Unlock()
+		c.connMu.Lock()
+		if c.xmppClient != nil {
+			_ = c.xmppClient.Close()
+			c.xmppClient = nil
+		}
+		c.connMu.Unlock()
 
-	// Wait for the workers to stop before closing the channel they send on.
-	// receiveWorker feeds pushNotificationChan via handlePushNotification, so
-	// closing it here — while that goroutine may still be in flight — raced to
-	// a "send on closed channel" panic. The select/default at the send site
-	// does not help: sending on a closed channel panics rather than taking the
-	// default branch. pushNotificationWorker exits on ctx.Done() and drains
-	// what is left, so the close is only for tidiness and can safely wait.
-	c.wg.Wait()
+		// Before waiting: handlers may be blocked submitting requests.
+		c.queue.Close()
+		c.wg.Wait()
 
-	close(c.pushNotificationChan)
-
-	c.queue.Close()
-
-	c.logger.Info("closed Nefit Easy client")
+		c.logger.Info("closed Nefit Easy client")
+	})
 
 	return nil
 }
@@ -240,50 +232,16 @@ func (c *Client) receiveWorker() {
 	}
 }
 
-func (c *Client) pushNotificationWorker() {
-	defer c.wg.Done()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			// Context cancelled - drain remaining messages before exiting
-			c.logger.Debug("push notification worker shutting down, draining queue")
-			c.drainPushNotifications()
-			return
-		case notification, ok := <-c.pushNotificationChan:
-			if !ok {
-				// Channel closed - drain any remaining messages
-				c.logger.Debug("push notification channel closed")
-				return
-			}
-			c.dispatchPushNotification(notification)
-		}
-	}
-}
-
-func (c *Client) drainPushNotifications() {
-	for {
-		select {
-		case notification, ok := <-c.pushNotificationChan:
-			if !ok {
-				return
-			}
-			c.dispatchPushNotification(notification)
-		default:
-			return
-		}
-	}
-}
-
 func (c *Client) dispatchPushNotification(notification PushNotification) {
 	c.eventHandlersMu.RLock()
 	handlers := make([]EventHandler, len(c.eventHandlers))
 	copy(handlers, c.eventHandlers)
 	c.eventHandlersMu.RUnlock()
 
-	// Each handler runs concurrently to avoid blocking on slow handlers
+	// Concurrent so a slow handler cannot stall the stream; tracked so Close
+	// does not return while one is still running.
 	for _, handler := range handlers {
-		go handler(notification.URI, notification.Data)
+		c.wg.Go(func() { handler(notification.URI, notification.Data) })
 	}
 }
 
@@ -353,6 +311,7 @@ func (c *Client) handleChatMessage(msg xmpp.Chat) error {
 
 // Subscribe registers an event handler that will be called when the backend
 // sends unsolicited push notifications. Multiple handlers can be registered.
+// Handlers run concurrently; Close waits for them to return.
 func (c *Client) Subscribe(handler EventHandler) {
 	c.eventHandlersMu.Lock()
 	defer c.eventHandlersMu.Unlock()
@@ -395,12 +354,7 @@ func (c *Client) handlePushNotification(resp *protocol.HTTPResponse) {
 
 		c.logger.Info("push notification received", "uri", uri, "data", data)
 
-		select {
-		case c.pushNotificationChan <- PushNotification{URI: uri, Data: data}:
-		default:
-			// Channel full - log warning but don't block
-			c.logger.Warn("push notification queue full, dropping message", "uri", uri)
-		}
+		c.dispatchPushNotification(PushNotification{URI: uri, Data: data})
 	}
 }
 

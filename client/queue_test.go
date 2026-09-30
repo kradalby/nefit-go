@@ -55,3 +55,31 @@ func waitQueued(q *RequestQueue) {
 		runtime.Gosched()
 	}
 }
+
+func TestQueueSubmitReturnsWhenClosed(t *testing.T) {
+	q := NewRequestQueue()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		_, _ = q.Submit(context.Background(), func() (any, error) {
+			close(started)
+			<-release
+			return nil, nil
+		})
+	}()
+	<-started
+
+	queued := make(chan error, 1)
+	go func() {
+		_, err := q.Submit(context.Background(), func() (any, error) { return nil, nil })
+		queued <- err
+	}()
+	waitQueued(q)
+
+	go q.Close()
+	if err := wait(t, queued); err == nil {
+		t.Error("request queued on a closed queue succeeded")
+	}
+}

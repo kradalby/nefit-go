@@ -201,3 +201,44 @@ func TestGetRoundTrip(t *testing.T) {
 		t.Errorf("value = %v, want 7.5", got)
 	}
 }
+
+func TestCloseTwice(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.connect(t)
+
+	if err := h.c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.c.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloseWaitsForPushHandlers(t *testing.T) {
+	h := newHarness(t, Config{})
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	h.c.Subscribe(func(uri string, _ any) {
+		started <- uri
+		<-release
+	})
+	f := h.connect(t)
+
+	f.in <- h.reply(t, types.URIStatus, "push")
+	if got := wait(t, started); got != types.URIStatus {
+		t.Fatalf("push uri = %q, want %q", got, types.URIStatus)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- h.c.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a push handler was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	if err := wait(t, closed); err != nil {
+		t.Fatal(err)
+	}
+}
