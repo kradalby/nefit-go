@@ -37,6 +37,8 @@ export NEFIT_PASSWORD=<password>
 nefit status
 ```
 
+If `HTTP_PROXY` is set, include `127.0.0.1` in `NO_PROXY`; the backend connection does not use a proxy. See [Known limits](API_NOTES.md#known-limits).
+
 ### Commands
 
 ```bash

@@ -40,6 +40,10 @@ func dialXMPP(ctx context.Context, addr string, o xmpp.Options) (transport, erro
 	r.wg.Go(r.serve)
 
 	stop := context.AfterFunc(ctx, r.shut)
+	// go-xmpp still dials around the relay: through HTTP_PROXY unless
+	// NO_PROXY matches this address, and to follow a <see-other-host>
+	// redirect inside TLS. Neither socket is ours, so ctx and Close cannot
+	// end them.
 	o.Host = ln.Addr().String()
 	xc, err := o.NewClient()
 	if !stop() {

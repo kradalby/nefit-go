@@ -36,6 +36,8 @@ type Config struct {
 
 	// ConnectTimeout bounds a login. It runs apart from the request that
 	// triggered it, which may stop waiting sooner, so it needs its own bound.
+	// Connections go-xmpp dials itself escape it; see "Known limits" in
+	// API_NOTES.md.
 	ConnectTimeout time.Duration
 }
 
