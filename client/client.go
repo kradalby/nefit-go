@@ -48,11 +48,6 @@ type Client struct {
 	// mu serialises publishing a connection against Close.
 	mu sync.Mutex
 
-	// Backend limitation: only one concurrent request allowed, so we need request/response correlation
-	pendingRequests map[string]chan *protocol.HTTPResponse
-	pendingErrors   map[string]chan error
-	pendingMu       sync.RWMutex
-
 	eventHandlers   []EventHandler
 	eventHandlersMu sync.RWMutex
 
@@ -80,14 +75,12 @@ func NewClient(config Config) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client := &Client{
-		config:          config,
-		encryptor:       encryptor,
-		queue:           NewRequestQueue(),
-		pendingRequests: make(map[string]chan *protocol.HTTPResponse),
-		pendingErrors:   make(map[string]chan error),
-		logger:          slog.Default(),
-		ctx:             ctx,
-		cancel:          cancel,
+		config:    config,
+		encryptor: encryptor,
+		queue:     NewRequestQueue(),
+		logger:    slog.Default(),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 	client.dial = client.dialXMPP
 
@@ -253,7 +246,7 @@ func (c *Client) receiveWorker(cn *conn) {
 			}
 			return
 		}
-		c.handleStanza(stanza)
+		c.handleStanza(cn, stanza)
 	}
 }
 
@@ -270,47 +263,38 @@ func (c *Client) dispatchPushNotification(notification PushNotification) {
 	}
 }
 
-func (c *Client) handleStanza(stanza any) {
+func (c *Client) handleStanza(cn *conn, stanza any) {
 	switch v := stanza.(type) {
 	case xmpp.Chat:
-		c.handleChatMessage(v)
+		c.handleChatMessage(cn, v)
 	case xmpp.Presence, xmpp.IQ:
 	default:
 		c.logger.Debug("unknown stanza type", "type", fmt.Sprintf("%T", v))
 	}
 }
 
-func (c *Client) handleChatMessage(msg xmpp.Chat) {
+func (c *Client) handleChatMessage(cn *conn, msg xmpp.Chat) {
 	c.logger.Debug("received chat message", "from", msg.Remote, "type", msg.Type)
 
 	if msg.Type == "error" {
 		c.logger.Error("received error message", "from", msg.Remote, "text", msg.Text)
-		c.notifyError(fmt.Errorf("XMPP error: %s", msg.Text))
+		c.route(cn, reply{err: fmt.Errorf("XMPP error: %s", msg.Text)})
 		return
 	}
 
-	if msg.Text != "" {
-		resp, err := protocol.ParseHTTPResponse(msg.Text)
-		if err != nil {
-			c.logger.Error("failed to parse HTTP response", "error", err, "body", msg.Text)
-			return
-		}
-
-		c.logger.Debug("parsed HTTP response", "status", resp.StatusCode)
-
-		// Check if this is a response to a pending request or an unsolicited push notification
-		c.pendingMu.RLock()
-		hasPendingRequests := len(c.pendingRequests) > 0
-		c.pendingMu.RUnlock()
-
-		if hasPendingRequests {
-			// This is likely a response to our request
-			c.notifyResponse(resp)
-		} else {
-			// This is an unsolicited push notification from the backend
-			c.handlePushNotification(resp)
-		}
+	if msg.Text == "" {
+		return
 	}
+
+	resp, err := protocol.ParseHTTPResponse(msg.Text)
+	if err != nil {
+		c.logger.Error("failed to parse HTTP response", "error", err, "body", msg.Text)
+		return
+	}
+
+	c.logger.Debug("parsed HTTP response", "status", resp.StatusCode)
+
+	c.route(cn, c.decode(resp))
 }
 
 // Subscribe registers an event handler that will be called when the backend
@@ -322,67 +306,90 @@ func (c *Client) Subscribe(handler EventHandler) {
 	c.eventHandlers = append(c.eventHandlers, handler)
 }
 
-func (c *Client) handlePushNotification(resp *protocol.HTTPResponse) {
-	c.logger.Debug("received push notification", "status", resp.StatusCode)
+// decode decrypts a successful reply's body and picks out the resource path
+// the backend echoes as its JSON id.
+func (c *Client) decode(resp *protocol.HTTPResponse) reply {
+	r := reply{resp: resp}
+	if resp.StatusCode != 200 || resp.Body == "" {
+		return r
+	}
 
-	if resp.Body != "" && resp.StatusCode == 200 {
-		// DecryptAndStrip, not Decrypt: AES-ECB pads the plaintext out to a
-		// block boundary with NUL bytes. Leaving them on made the JSON parse
-		// below fail on every notification ("invalid character '\x00' after
-		// top-level value"), so data fell back to the raw padded string, the
-		// map[string]any assertion never succeeded, and every event was
-		// dispatched with an empty URI. The GET path already strips them.
-		decrypted, err := c.encryptor.DecryptAndStrip(resp.Body)
-		if err != nil {
-			c.logger.Error("failed to decrypt push notification", "error", err)
-			return
-		}
+	// Strip: AES-ECB pads with NUL bytes, which break the JSON parse.
+	decrypted, err := c.encryptor.DecryptAndStrip(resp.Body)
+	if err != nil {
+		r.err = fmt.Errorf("decryption failed: %w", err)
+		return r
+	}
 
-		var data any
-		if resp.ContentType == "application/json" {
-			if err := json.Unmarshal([]byte(decrypted), &data); err != nil {
-				c.logger.Warn("failed to parse JSON push notification", "error", err, "data", decrypted)
-				data = decrypted
-			}
-		} else {
-			data = decrypted
-		}
-
-		// Extract URI from the data if possible (the response might contain an 'id' field with the URI)
-		uri := ""
-		if dataMap, ok := data.(map[string]any); ok {
-			if id, ok := dataMap["id"].(string); ok {
-				uri = id
+	r.data = decrypted
+	if strings.Contains(resp.ContentType, "json") {
+		var v any
+		if err := json.Unmarshal([]byte(decrypted), &v); err == nil {
+			r.data = v
+			if m, ok := v.(map[string]any); ok {
+				r.id, _ = m["id"].(string)
 			}
 		}
-
-		c.logger.Info("push notification received", "uri", uri, "data", data)
-
-		c.dispatchPushNotification(PushNotification{URI: uri, Data: data})
 	}
+
+	return r
 }
 
-func (c *Client) notifyResponse(resp *protocol.HTTPResponse) {
-	c.pendingMu.RLock()
-	defer c.pendingMu.RUnlock()
-
-	for _, ch := range c.pendingRequests {
-		select {
-		case ch <- resp:
-		default:
-		}
+// route hands r to the in-flight request if it can be its answer. Anything
+// else is a late reply to an abandoned request or a push notification.
+func (c *Client) route(cn *conn, r reply) {
+	p, late := cn.match(r)
+	if p != nil {
+		p.reply <- r
+		return
 	}
+	if late {
+		c.logger.Debug("dropping late reply", "uri", r.id)
+		return
+	}
+
+	if r.err != nil {
+		c.logger.Warn("dropping unmatched reply", "error", r.err)
+		return
+	}
+
+	if r.resp.StatusCode != 200 || r.data == nil {
+		c.logger.Debug("dropping unmatched reply", "status", r.resp.StatusCode)
+		return
+	}
+
+	c.logger.Info("push notification received", "uri", r.id, "data", r.data)
+	c.dispatchPushNotification(PushNotification{URI: r.id, Data: r.data})
 }
 
-func (c *Client) notifyError(err error) {
-	c.pendingMu.RLock()
-	defer c.pendingMu.RUnlock()
+// roundTrip sends msg on the current session and waits for its reply. The
+// session is read once: a reply can only arrive on the stream the request
+// went out on.
+func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (reply, error) {
+	cn := c.conn.Load()
+	if cn == nil || !cn.alive() {
+		return reply{}, errNotConnected
+	}
 
-	for _, ch := range c.pendingErrors {
-		select {
-		case ch <- err:
-		default:
-		}
+	// The queue runs one request at a time, so the slot is free. Claim it
+	// before sending: the reply may beat Send's return.
+	p := &pending{uri: uri, get: get, reply: make(chan reply, 1)}
+	cn.begin(p)
+
+	if err := c.sendMessage(cn, msg); err != nil {
+		cn.end(p, false)
+		return reply{}, fmt.Errorf("failed to send message: %w", err)
+	}
+
+	select {
+	case r := <-p.reply:
+		return r, r.err
+	case <-cn.done:
+		cn.end(p, false)
+		return reply{}, errConnectionLost
+	case <-ctx.Done():
+		cn.end(p, true)
+		return reply{}, ctx.Err()
 	}
 }
 
@@ -445,61 +452,16 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 
 	c.logger.Debug("sending GET request", "uri", uri)
 
-	// One snapshot for send and wait: a reply can only arrive on the
-	// session the request went out on.
-	cn := c.conn.Load()
-	if cn == nil || !cn.alive() {
-		return nil, errNotConnected
-	}
-
-	responseCh := make(chan *protocol.HTTPResponse, 1)
-	errorCh := make(chan error, 1)
-
-	reqID := fmt.Sprintf("get:%s:%d", uri, time.Now().UnixNano())
-	c.pendingMu.Lock()
-	c.pendingRequests[reqID] = responseCh
-	c.pendingErrors[reqID] = errorCh
-	c.pendingMu.Unlock()
-
-	defer func() {
-		c.pendingMu.Lock()
-		delete(c.pendingRequests, reqID)
-		delete(c.pendingErrors, reqID)
-		c.pendingMu.Unlock()
-	}()
-
-	if err := c.sendMessage(cn, msg); err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
-	}
-
-	select {
-	case resp := <-responseCh:
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, resp.Status)
-		}
-
-		decrypted, err := c.encryptor.DecryptAndStrip(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("decryption failed: %w", err)
-		}
-
-		if strings.Contains(resp.ContentType, "json") {
-			var result any
-			if err := json.Unmarshal([]byte(decrypted), &result); err != nil {
-				return decrypted, nil
-			}
-			return result, nil
-		}
-
-		return decrypted, nil
-
-	case err := <-errorCh:
+	r, err := c.roundTrip(ctx, uri, msg, true)
+	if err != nil {
 		return nil, err
-	case <-cn.done:
-		return nil, errConnectionLost
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
+
+	if r.resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP error %d: %s", r.resp.StatusCode, r.resp.Status)
+	}
+
+	return r.data, nil
 }
 
 // Put performs a PUT request to the specified URI with the given data.
@@ -604,50 +566,23 @@ func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData st
 		"encrypted_payload_length", len(encryptedData),
 		"decrypted_json", jsonData)
 
-	cn := c.conn.Load()
-	if cn == nil || !cn.alive() {
-		return errNotConnected
-	}
-
-	responseCh := make(chan *protocol.HTTPResponse, 1)
-	errorCh := make(chan error, 1)
-
-	reqID := fmt.Sprintf("put:%s:%d", uri, time.Now().UnixNano())
-	c.pendingMu.Lock()
-	c.pendingRequests[reqID] = responseCh
-	c.pendingErrors[reqID] = errorCh
-	c.pendingMu.Unlock()
-
-	defer func() {
-		c.pendingMu.Lock()
-		delete(c.pendingRequests, reqID)
-		delete(c.pendingErrors, reqID)
-		c.pendingMu.Unlock()
-	}()
-
-	if err := c.sendMessage(cn, msg); err != nil {
-		return fmt.Errorf("failed to send message: %w", err)
-	}
-
-	select {
-	case resp := <-responseCh:
-		if resp.StatusCode >= 300 {
-			c.logger.Error("PUT request failed",
-				"uri", uri,
-				"status_code", resp.StatusCode,
-				"status", resp.Status,
-				"json_data", jsonData)
-			return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, resp.Status)
-		}
-		c.logger.Debug("PUT request successful",
-			"uri", uri,
-			"status_code", resp.StatusCode)
-		return nil
-	case err := <-errorCh:
+	r, err := c.roundTrip(ctx, uri, msg, false)
+	if err != nil {
 		return err
-	case <-cn.done:
-		return errConnectionLost
-	case <-ctx.Done():
-		return ctx.Err()
 	}
+
+	if r.resp.StatusCode >= 300 {
+		c.logger.Error("PUT request failed",
+			"uri", uri,
+			"status_code", r.resp.StatusCode,
+			"status", r.resp.Status,
+			"json_data", jsonData)
+		return fmt.Errorf("HTTP error %d: %s", r.resp.StatusCode, r.resp.Status)
+	}
+
+	c.logger.Debug("PUT request successful",
+		"uri", uri,
+		"status_code", r.resp.StatusCode)
+
+	return nil
 }

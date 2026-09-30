@@ -369,3 +369,127 @@ func TestConnectionLossFailsPendingRequest(t *testing.T) {
 		t.Fatal("Get succeeded on a lost connection")
 	}
 }
+
+func rawReply(text string) xmpp.Chat {
+	return xmpp.Chat{Type: "chat", Text: text}
+}
+
+func TestReplyForOtherResourceIsNotTheAnswer(t *testing.T) {
+	h := newHarness(t, Config{})
+	pushes := make(chan string, 4)
+	h.c.Subscribe(func(uri string, _ any) { pushes <- uri })
+	f := h.connect(t)
+
+	res := h.get(t.Context(), types.URIOutdoorTemp)
+	f.request(t)
+	f.in <- h.reply(t, types.URIStatus, "status")
+	f.in <- h.reply(t, types.URIOutdoorTemp, 7.5)
+
+	if got := valueOf(t, wait(t, res)); got != 7.5 {
+		t.Errorf("value = %v, want 7.5", got)
+	}
+	if got := wait(t, pushes); got != types.URIStatus {
+		t.Errorf("push uri = %q, want %q", got, types.URIStatus)
+	}
+}
+
+func TestLateReplyIsNotAPush(t *testing.T) {
+	// Long enough for the queue to pick up the retry before it expires.
+	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond, MaxRetries: 1})
+	pushes := make(chan any, 8)
+	h.c.Subscribe(func(_ string, data any) {
+		pushes <- data.(map[string]any)["value"]
+	})
+	f := h.connect(t)
+
+	res := h.get(t.Context(), types.URIStatus)
+	f.request(t)
+	f.request(t)
+	if r := wait(t, res); r.err == nil {
+		t.Fatal("Get succeeded without a reply")
+	}
+
+	// Both attempts are answered after their callers gave up.
+	f.in <- h.reply(t, types.URIStatus, "late")
+	f.in <- h.reply(t, types.URIStatus, "late")
+	f.in <- h.reply(t, types.URIStatus, "push")
+
+	if got := wait(t, pushes); got != "push" {
+		t.Errorf("push = %v, want the real push", got)
+	}
+	_ = h.c.Close()
+	if n := len(pushes); n != 0 {
+		t.Errorf("%d late replies dispatched as pushes", n)
+	}
+}
+
+func TestReplyIDOmitsQuery(t *testing.T) {
+	h := newHarness(t, Config{})
+	f := h.connect(t)
+
+	res := h.get(t.Context(), types.URIGasUsage+"?page=1")
+	f.request(t)
+	f.in <- h.reply(t, types.URIGasUsage, "page one")
+
+	if got := valueOf(t, wait(t, res)); got != "page one" {
+		t.Errorf("value = %v, want page one", got)
+	}
+}
+
+func TestBodilessSuccessDoesNotAnswerGet(t *testing.T) {
+	h := newHarness(t, Config{})
+	f := h.connect(t)
+
+	res := h.get(t.Context(), types.URIStatus)
+	f.request(t)
+	f.in <- rawReply("HTTP/1.1 204 No Content\n\n") // a late PUT ack
+	f.in <- h.reply(t, types.URIStatus, "ok")
+
+	if got := valueOf(t, wait(t, res)); got != "ok" {
+		t.Errorf("value = %v, want ok", got)
+	}
+}
+
+func TestGetErrorStatus(t *testing.T) {
+	h := newHarness(t, Config{})
+	f := h.connect(t)
+
+	res := h.get(t.Context(), types.URIStatus)
+	f.request(t)
+	f.in <- rawReply("HTTP/1.1 404 Not Found\n\n")
+
+	r := wait(t, res)
+	if r.err == nil || !strings.Contains(r.err.Error(), "404") {
+		t.Errorf("Get error = %v, want HTTP 404", r.err)
+	}
+}
+
+func TestPutRoundTrip(t *testing.T) {
+	h := newHarness(t, Config{})
+	pushes := make(chan string, 4)
+	h.c.Subscribe(func(uri string, _ any) { pushes <- uri })
+	f := h.connect(t)
+
+	done := make(chan error, 1)
+	go func() { done <- h.c.Put(t.Context(), types.URIUserMode, map[string]string{"value": "clock"}) }()
+	if got, want := f.request(t), "PUT "+types.URIUserMode+" HTTP/1.1"; got != want {
+		t.Fatalf("request = %q, want %q", got, want)
+	}
+
+	// A push naming the same resource is not the PUT's ack.
+	f.in <- h.reply(t, types.URIUserMode, "clock")
+	if got := wait(t, pushes); got != types.URIUserMode {
+		t.Fatalf("push uri = %q, want %q", got, types.URIUserMode)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Put returned %v before its ack", err)
+	default:
+	}
+
+	f.in <- rawReply("HTTP/1.1 204 No Content\n\n")
+
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
