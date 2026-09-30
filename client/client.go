@@ -91,8 +91,8 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 // Connect opens a session unless one is live, so pushes flow before the
 // first request. Concurrent callers, requests included, share one login. A
 // nil error means a session was established; it may have ended since, so
-// watch Done. If ctx ends first, the login carries on, bounded by
-// ConnectTimeout, for whoever needs a session next.
+// watch Done. If ctx ends first, the login carries on for whoever needs a
+// session next, bounded by [Config.ConnectTimeout] save the cases it notes.
 func (c *Client) Connect(ctx context.Context) error {
 	_, err := c.session(ctx)
 	return err
