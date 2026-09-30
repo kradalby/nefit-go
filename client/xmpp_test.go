@@ -2,9 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,23 +69,82 @@ func stalledServer(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-func TestCloseWithStalledPeer(t *testing.T) {
-	addr := stalledServer(t)
+// silentServer accepts connections and never answers, as a backend that
+// stalls mid-handshake would.
+func silentServer(t *testing.T) string {
+	t.Helper()
 
-	c, err := NewClient(Config{SerialNumber: "123456789", AccessKey: "abcdefghijklmnop", Password: "secret"})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		_ = ln.Close()
+		wg.Wait()
+	})
+
+	wg.Go(func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() {
+				_, _ = io.Copy(io.Discard, conn)
+				_ = conn.Close()
+			})
+		}
+	})
+
+	return ln.Addr().String()
+}
+
+// xmppClient returns a client that logs in to addr with real go-xmpp.
+func xmppClient(t *testing.T, addr string, cfg Config) *Client {
+	t.Helper()
+
+	cfg.SerialNumber = "123456789"
+	cfg.AccessKey = "abcdefghijklmnop"
+	cfg.Password = "secret"
+	c, err := NewClient(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.SetLogger(slog.New(slog.DiscardHandler))
-	c.dial = func(context.Context) (transport, error) {
-		return newXMPPTransport(xmpp.Options{
-			Host:                         addr,
+	c.dial = func(ctx context.Context) (transport, error) {
+		return dialXMPP(ctx, addr, xmpp.Options{
 			User:                         "u@localhost",
 			Password:                     "p",
 			NoTLS:                        true,
 			InsecureAllowUnencryptedAuth: true,
 		})
 	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	return c
+}
+
+func TestConnectGivesUpOnStalledHandshake(t *testing.T) {
+	c := xmppClient(t, silentServer(t), Config{})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	connected := make(chan error, 1)
+	go func() { connected <- c.Connect(ctx) }()
+	if err := wait(t, connected); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Connect = %v, want deadline exceeded", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	if err := wait(t, closed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloseWithStalledPeer(t *testing.T) {
+	c := xmppClient(t, stalledServer(t), Config{})
 	if err := c.Connect(t.Context()); err != nil {
 		t.Fatal(err)
 	}
