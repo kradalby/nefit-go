@@ -85,6 +85,8 @@ Example:
 			fmt.Println("\nReceived interrupt, shutting down...")
 		case <-ctx.Done():
 			fmt.Println("\nContext cancelled, shutting down...")
+		case <-c.Done():
+			return fmt.Errorf("connection lost")
 		}
 
 		return nil

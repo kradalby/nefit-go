@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xmpp "github.com/xmppo/go-xmpp"
@@ -42,9 +43,10 @@ type Client struct {
 	encryptor *crypto.Encryptor
 	queue     *RequestQueue
 
-	dial       func(context.Context) (transport, error)
-	xmppClient transport
-	connMu     sync.RWMutex
+	dial func(context.Context) (transport, error)
+	conn atomic.Pointer[conn]
+	// mu serialises publishing a connection against Close.
+	mu sync.Mutex
 
 	// Backend limitation: only one concurrent request allowed, so we need request/response correlation
 	pendingRequests map[string]chan *protocol.HTTPResponse
@@ -99,28 +101,57 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 }
 
 // Connect establishes the XMPP connection and starts background workers.
-// The connection uses STARTTLS (plain TCP upgraded to TLS) as required by Bosch servers.
+// It is a no-op while connected. Once Done is closed, call Connect again to
+// reconnect.
 func (c *Client) Connect(ctx context.Context) error {
+	if c.IsConnected() {
+		return nil
+	}
+	if c.ctx.Err() != nil {
+		return errClosed
+	}
+
 	c.logger.Info("connecting to Nefit Easy backend",
 		"host", c.config.Host,
 		"jid", c.config.JID())
 
-	xmppClient, err := c.dial(ctx)
+	t, err := c.dial(ctx)
 	if err != nil {
 		return err
 	}
 
-	c.connMu.Lock()
-	c.xmppClient = xmppClient
-	c.connMu.Unlock()
+	started, err := c.publish(t)
+	if !started {
+		// Outside the lock: a graceful close waits on the server.
+		_ = t.Close()
+		return err
+	}
 
 	c.logger.Info("connected to Nefit Easy backend")
 
-	c.wg.Add(2)
-	go c.pingWorker()
-	go c.receiveWorker()
-
 	return nil
+}
+
+// publish starts a session on t unless the client was closed or a concurrent
+// Connect won meanwhile.
+func (c *Client) publish(t transport) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ctx.Err() != nil {
+		return false, errClosed
+	}
+	if c.IsConnected() {
+		return false, nil
+	}
+
+	cn := newConn(c.ctx, t)
+	c.conn.Store(cn)
+	c.wg.Add(2)
+	go c.pingWorker(cn)
+	go c.receiveWorker(cn)
+
+	return true, nil
 }
 
 func (c *Client) dialXMPP(context.Context) (transport, error) {
@@ -153,14 +184,14 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.logger.Info("closing Nefit Easy client")
 
+		c.mu.Lock()
 		c.cancel()
+		cn := c.conn.Swap(nil)
+		c.mu.Unlock()
 
-		c.connMu.Lock()
-		if c.xmppClient != nil {
-			_ = c.xmppClient.Close()
-			c.xmppClient = nil
+		if cn != nil {
+			cn.close()
 		}
-		c.connMu.Unlock()
 
 		// Before waiting: handlers may be blocked submitting requests.
 		c.queue.Close()
@@ -172,14 +203,22 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// IsConnected checks whether the client currently has an active XMPP connection.
+// IsConnected reports whether the current connection is alive.
 func (c *Client) IsConnected() bool {
-	c.connMu.RLock()
-	defer c.connMu.RUnlock()
-	return c.xmppClient != nil
+	cn := c.conn.Load()
+	return cn != nil && cn.alive()
 }
 
-func (c *Client) pingWorker() {
+// Done returns a channel that is closed when the current connection is lost
+// or the client is closed. Without a connection it is already closed.
+func (c *Client) Done() <-chan struct{} {
+	if cn := c.conn.Load(); cn != nil {
+		return cn.done
+	}
+	return closedChan
+}
+
+func (c *Client) pingWorker(cn *conn) {
 	defer c.wg.Done()
 
 	ticker := time.NewTicker(c.config.PingInterval)
@@ -187,48 +226,34 @@ func (c *Client) pingWorker() {
 
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-cn.ctx.Done():
 			return
 		case <-ticker.C:
-			if err := c.sendPing(); err != nil {
+			if _, err := cn.xmpp.SendPresence(xmpp.Presence{}); err != nil {
 				c.logger.Error("failed to send ping", "error", err)
+				continue
 			}
+			c.logger.Debug("sent keepalive ping")
 		}
 	}
 }
 
-func (c *Client) sendPing() error {
-	c.connMu.RLock()
-	client := c.xmppClient
-	c.connMu.RUnlock()
-
-	if client == nil {
-		return fmt.Errorf("not connected")
-	}
-
-	_, err := client.SendPresence(xmpp.Presence{})
-	if err != nil {
-		return fmt.Errorf("failed to send presence: %w", err)
-	}
-
-	c.logger.Debug("sent keepalive ping")
-	return nil
-}
-
-func (c *Client) receiveWorker() {
+// receiveWorker owns the read side of cn. A read error ends the session: the
+// stream decoder's error is sticky, so retrying could never succeed.
+func (c *Client) receiveWorker(cn *conn) {
 	defer c.wg.Done()
+	defer cn.close()
+	defer close(cn.done)
 
 	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		default:
-			if err := c.receiveMessage(); err != nil {
-				c.logger.Error("error receiving message", "error", err)
-				// Add a small delay to prevent tight loop on errors
-				time.Sleep(100 * time.Millisecond)
+		stanza, err := cn.xmpp.Recv()
+		if err != nil {
+			if cn.ctx.Err() == nil {
+				c.logger.Error("connection lost", "error", err)
 			}
+			return
 		}
+		c.handleStanza(stanza)
 	}
 }
 
@@ -245,49 +270,30 @@ func (c *Client) dispatchPushNotification(notification PushNotification) {
 	}
 }
 
-func (c *Client) receiveMessage() error {
-	c.connMu.RLock()
-	client := c.xmppClient
-	c.connMu.RUnlock()
-
-	if client == nil {
-		return fmt.Errorf("not connected")
-	}
-
-	stanza, err := client.Recv()
-	if err != nil {
-		return fmt.Errorf("failed to receive stanza: %w", err)
-	}
-
+func (c *Client) handleStanza(stanza any) {
 	switch v := stanza.(type) {
 	case xmpp.Chat:
-		return c.handleChatMessage(v)
-	case xmpp.Presence:
-		// Ignore presence for now
-		return nil
-	case xmpp.IQ:
-		// Ignore IQ for now
-		return nil
+		c.handleChatMessage(v)
+	case xmpp.Presence, xmpp.IQ:
 	default:
 		c.logger.Debug("unknown stanza type", "type", fmt.Sprintf("%T", v))
-		return nil
 	}
 }
 
-func (c *Client) handleChatMessage(msg xmpp.Chat) error {
+func (c *Client) handleChatMessage(msg xmpp.Chat) {
 	c.logger.Debug("received chat message", "from", msg.Remote, "type", msg.Type)
 
 	if msg.Type == "error" {
 		c.logger.Error("received error message", "from", msg.Remote, "text", msg.Text)
 		c.notifyError(fmt.Errorf("XMPP error: %s", msg.Text))
-		return nil
+		return
 	}
 
 	if msg.Text != "" {
 		resp, err := protocol.ParseHTTPResponse(msg.Text)
 		if err != nil {
 			c.logger.Error("failed to parse HTTP response", "error", err, "body", msg.Text)
-			return nil
+			return
 		}
 
 		c.logger.Debug("parsed HTTP response", "status", resp.StatusCode)
@@ -305,8 +311,6 @@ func (c *Client) handleChatMessage(msg xmpp.Chat) error {
 			c.handlePushNotification(resp)
 		}
 	}
-
-	return nil
 }
 
 // Subscribe registers an event handler that will be called when the backend
@@ -382,15 +386,7 @@ func (c *Client) notifyError(err error) {
 	}
 }
 
-func (c *Client) sendMessage(msg string) error {
-	c.connMu.RLock()
-	client := c.xmppClient
-	c.connMu.RUnlock()
-
-	if client == nil {
-		return fmt.Errorf("not connected")
-	}
-
+func (c *Client) sendMessage(cn *conn, msg string) error {
 	var msgStanza struct {
 		To   string `xml:"to,attr"`
 		Body string `xml:"body"`
@@ -399,7 +395,7 @@ func (c *Client) sendMessage(msg string) error {
 		return fmt.Errorf("failed to parse message: %w", err)
 	}
 
-	_, err := client.Send(xmpp.Chat{
+	_, err := cn.xmpp.Send(xmpp.Chat{
 		Remote: msgStanza.To,
 		Type:   "chat",
 		Text:   msgStanza.Body,
@@ -411,7 +407,7 @@ func (c *Client) sendMessage(msg string) error {
 // The method automatically retries on timeout and deserializes JSON responses.
 func (c *Client) Get(ctx context.Context, uri string) (any, error) {
 	if !c.IsConnected() {
-		return nil, fmt.Errorf("not connected")
+		return nil, errNotConnected
 	}
 
 	var lastErr error
@@ -449,6 +445,13 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 
 	c.logger.Debug("sending GET request", "uri", uri)
 
+	// One snapshot for send and wait: a reply can only arrive on the
+	// session the request went out on.
+	cn := c.conn.Load()
+	if cn == nil || !cn.alive() {
+		return nil, errNotConnected
+	}
+
 	responseCh := make(chan *protocol.HTTPResponse, 1)
 	errorCh := make(chan error, 1)
 
@@ -465,7 +468,7 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 		c.pendingMu.Unlock()
 	}()
 
-	if err := c.sendMessage(msg); err != nil {
+	if err := c.sendMessage(cn, msg); err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -492,6 +495,8 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 
 	case err := <-errorCh:
 		return nil, err
+	case <-cn.done:
+		return nil, errConnectionLost
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -502,7 +507,7 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 // The method uses exponential backoff for retries on transient errors.
 func (c *Client) Put(ctx context.Context, uri string, data any) error {
 	if !c.IsConnected() {
-		return fmt.Errorf("not connected")
+		return errNotConnected
 	}
 
 	var jsonData string
@@ -599,6 +604,11 @@ func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData st
 		"encrypted_payload_length", len(encryptedData),
 		"decrypted_json", jsonData)
 
+	cn := c.conn.Load()
+	if cn == nil || !cn.alive() {
+		return errNotConnected
+	}
+
 	responseCh := make(chan *protocol.HTTPResponse, 1)
 	errorCh := make(chan error, 1)
 
@@ -615,7 +625,7 @@ func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData st
 		c.pendingMu.Unlock()
 	}()
 
-	if err := c.sendMessage(msg); err != nil {
+	if err := c.sendMessage(cn, msg); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
@@ -635,6 +645,8 @@ func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData st
 		return nil
 	case err := <-errorCh:
 		return err
+	case <-cn.done:
+		return errConnectionLost
 	case <-ctx.Done():
 		return ctx.Err()
 	}
