@@ -26,6 +26,15 @@ type PushNotification struct {
 	Data any
 }
 
+// transport is the subset of *xmpp.Client the client relies on, so tests can
+// drive the client without a server.
+type transport interface {
+	Recv() (any, error)
+	Send(xmpp.Chat) (int, error)
+	SendPresence(xmpp.Presence) (int, error)
+	Close() error
+}
+
 // Client represents an active connection to the Nefit Easy backend.
 // It handles XMPP communication, encryption, request queueing, and push notifications.
 type Client struct {
@@ -33,7 +42,8 @@ type Client struct {
 	encryptor *crypto.Encryptor
 	queue     *RequestQueue
 
-	xmppClient *xmpp.Client
+	dial       func(context.Context) (transport, error)
+	xmppClient transport
 	connMu     sync.RWMutex
 
 	// Backend limitation: only one concurrent request allowed, so we need request/response correlation
@@ -78,6 +88,7 @@ func NewClient(config Config) (*Client, error) {
 		ctx:                  ctx,
 		cancel:               cancel,
 	}
+	client.dial = client.dialXMPP
 
 	return client, nil
 }
@@ -95,6 +106,26 @@ func (c *Client) Connect(ctx context.Context) error {
 		"host", c.config.Host,
 		"jid", c.config.JID())
 
+	xmppClient, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
+
+	c.connMu.Lock()
+	c.xmppClient = xmppClient
+	c.connMu.Unlock()
+
+	c.logger.Info("connected to Nefit Easy backend")
+
+	c.wg.Add(3)
+	go c.pingWorker()
+	go c.receiveWorker()
+	go c.pushNotificationWorker()
+
+	return nil
+}
+
+func (c *Client) dialXMPP(context.Context) (transport, error) {
 	// Bosch servers require STARTTLS (plain TCP → TLS upgrade), not direct TLS
 	options := xmpp.Options{
 		Host:     fmt.Sprintf("%s:%d", c.config.Host, c.config.Port),
@@ -111,21 +142,10 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	xmppClient, err := options.NewClient()
 	if err != nil {
-		return fmt.Errorf("failed to create XMPP client: %w", err)
+		return nil, fmt.Errorf("failed to create XMPP client: %w", err)
 	}
 
-	c.connMu.Lock()
-	c.xmppClient = xmppClient
-	c.connMu.Unlock()
-
-	c.logger.Info("connected to Nefit Easy backend")
-
-	c.wg.Add(3)
-	go c.pingWorker()
-	go c.receiveWorker()
-	go c.pushNotificationWorker()
-
-	return nil
+	return xmppClient, nil
 }
 
 // Close disconnects from the XMPP server and cleans up resources.
