@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -38,8 +39,9 @@ type Client struct {
 
 	dial func(context.Context) (transport, error)
 	conn atomic.Pointer[conn]
-	// mu serialises publishing a connection against Close.
-	mu sync.Mutex
+	// mu serialises starting and publishing a dial against Close.
+	mu      sync.Mutex
+	dialing *dialCall
 
 	eventHandlers   []EventHandler
 	eventHandlersMu sync.RWMutex
@@ -53,7 +55,7 @@ type Client struct {
 }
 
 // NewClient creates a new Nefit Easy client with the given configuration.
-// The client must be explicitly connected using Connect() before use.
+// Requests connect on demand; Connect does so ahead of them.
 func NewClient(config Config) (*Client, error) {
 	config = config.WithDefaults()
 	if err := config.Validate(); err != nil {
@@ -86,57 +88,85 @@ func (c *Client) SetLogger(logger *slog.Logger) {
 	c.logger = logger
 }
 
-// Connect establishes the XMPP connection and starts background workers.
-// It is a no-op while connected. Once Done is closed, call Connect again to
-// reconnect; requests also reconnect on their own.
+// Connect opens a session unless one is live, so pushes flow before the
+// first request. Concurrent callers, requests included, share one login. A
+// nil error means a session was established; it may have ended since, so
+// watch Done. If ctx ends first, the login carries on, bounded by
+// ConnectTimeout, for whoever needs a session next.
 func (c *Client) Connect(ctx context.Context) error {
-	if c.IsConnected() {
-		return nil
-	}
-	if c.ctx.Err() != nil {
-		return errClosed
-	}
+	_, err := c.session(ctx)
+	return err
+}
 
+// dialCall is a login in flight.
+type dialCall struct {
+	done chan struct{}
+	cn   *conn
+	err  error
+}
+
+// session returns the live session, or waits for one to be dialled. The dial
+// runs under the client's lifetime, not ctx: a caller giving up must not
+// abort a login others are waiting on.
+func (c *Client) session(ctx context.Context) (*conn, error) {
+	c.mu.Lock()
+	if c.ctx.Err() != nil {
+		c.mu.Unlock()
+		return nil, errClosed
+	}
+	if cn := c.conn.Load(); cn != nil && cn.alive() {
+		c.mu.Unlock()
+		return cn, nil
+	}
+	d := c.dialing
+	if d == nil {
+		d = &dialCall{done: make(chan struct{})}
+		c.dialing = d
+		c.wg.Go(func() { c.runDial(d) })
+	}
+	c.mu.Unlock()
+
+	select {
+	case <-d.done:
+		return d.cn, d.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (c *Client) runDial(d *dialCall) {
 	c.logger.Info("connecting to Nefit Easy backend",
 		"host", c.config.Host,
 		"jid", c.config.JID())
 
+	ctx, cancel := context.WithTimeout(c.ctx, c.config.ConnectTimeout)
 	t, err := c.dial(ctx)
-	if err != nil {
-		return err
-	}
+	cancel()
 
-	started, err := c.publish(t)
-	if !started {
-		_ = t.Close()
-		return err
-	}
-
-	c.logger.Info("connected to Nefit Easy backend")
-
-	return nil
-}
-
-// publish starts a session on t unless the client was closed or a concurrent
-// Connect won meanwhile.
-func (c *Client) publish(t transport) (bool, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.ctx.Err() != nil {
-		return false, errClosed
+	switch {
+	case c.ctx.Err() != nil:
+		if err == nil {
+			_ = t.Close()
+		}
+		err = errClosed
+	case err == nil:
+		d.cn = newConn(c.ctx, t)
+		c.conn.Store(d.cn)
+		c.wg.Go(func() { c.pingWorker(d.cn) })
+		c.wg.Go(func() { c.receiveWorker(d.cn) })
 	}
-	if c.IsConnected() {
-		return false, nil
+	d.err = err
+	c.dialing = nil
+	c.mu.Unlock()
+	close(d.done)
+
+	switch {
+	case err == nil:
+		c.logger.Info("connected to Nefit Easy backend")
+	case !errors.Is(err, errClosed):
+		c.logger.Error("failed to connect to Nefit Easy backend", "error", err)
 	}
-
-	cn := newConn(c.ctx, t)
-	c.conn.Store(cn)
-	c.wg.Add(2)
-	go c.pingWorker(cn)
-	go c.receiveWorker(cn)
-
-	return true, nil
 }
 
 func (c *Client) dialBackend(ctx context.Context) (transport, error) {
@@ -200,8 +230,6 @@ func (c *Client) Done() <-chan struct{} {
 }
 
 func (c *Client) pingWorker(cn *conn) {
-	defer c.wg.Done()
-
 	ticker := time.NewTicker(c.config.PingInterval)
 	defer ticker.Stop()
 
@@ -222,7 +250,6 @@ func (c *Client) pingWorker(cn *conn) {
 // receiveWorker owns the read side of cn. A read error ends the session: the
 // stream decoder's error is sticky, so retrying could never succeed.
 func (c *Client) receiveWorker(cn *conn) {
-	defer c.wg.Done()
 	defer cn.close()
 
 	for {
@@ -350,13 +377,9 @@ func (c *Client) route(cn *conn, r reply) {
 // session is read once: a reply can only arrive on the stream the request
 // went out on.
 func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (reply, error) {
-	// A request that timed out ahead of this one retired its session.
-	if err := c.Connect(ctx); err != nil {
+	cn, err := c.session(ctx)
+	if err != nil {
 		return reply{}, err
-	}
-	cn := c.conn.Load()
-	if cn == nil || !cn.alive() {
-		return reply{}, errNotConnected
 	}
 	// Unsent, an expired request costs nothing; sent, it retires the session.
 	if err := ctx.Err(); err != nil {
@@ -406,10 +429,6 @@ func (c *Client) sendMessage(cn *conn, msg string) error {
 // Get performs a GET request to the specified URI and returns the decrypted response data.
 // The method automatically retries on timeout and deserializes JSON responses.
 func (c *Client) Get(ctx context.Context, uri string) (any, error) {
-	if !c.IsConnected() {
-		return nil, errNotConnected
-	}
-
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -461,10 +480,6 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 // Data is automatically marshalled to JSON and encrypted before sending.
 // The method uses exponential backoff for retries on transient errors.
 func (c *Client) Put(ctx context.Context, uri string, data any) error {
-	if !c.IsConnected() {
-		return errNotConnected
-	}
-
 	var jsonData string
 	switch v := data.(type) {
 	case string:

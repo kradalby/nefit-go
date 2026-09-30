@@ -126,7 +126,7 @@ func xmppClient(t *testing.T, addr string, cfg Config) *Client {
 }
 
 func TestConnectGivesUpOnStalledHandshake(t *testing.T) {
-	c := xmppClient(t, silentServer(t), Config{})
+	c := xmppClient(t, silentServer(t), Config{RetryTimeout: 200 * time.Millisecond, ConnectTimeout: time.Hour})
 
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
@@ -136,10 +136,30 @@ func TestConnectGivesUpOnStalledHandshake(t *testing.T) {
 		t.Fatalf("Connect = %v, want deadline exceeded", err)
 	}
 
+	// A request waiting on the same handshake keeps its own deadline.
+	got := make(chan error, 1)
+	go func() {
+		_, err := c.Get(t.Context(), "/x")
+		got <- err
+	}()
+	if err := wait(t, got); err == nil {
+		t.Fatal("Get succeeded without a session")
+	}
+
 	closed := make(chan error, 1)
 	go func() { closed <- c.Close() }()
 	if err := wait(t, closed); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConnectTimeoutBoundsHandshake(t *testing.T) {
+	c := xmppClient(t, silentServer(t), Config{ConnectTimeout: 200 * time.Millisecond})
+
+	connected := make(chan error, 1)
+	go func() { connected <- c.Connect(context.Background()) }()
+	if err := wait(t, connected); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Connect = %v, want deadline exceeded", err)
 	}
 }
 

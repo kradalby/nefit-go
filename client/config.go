@@ -18,6 +18,8 @@ const (
 	DefaultPingInterval = 30 * time.Second
 	DefaultMaxRetries   = 3 // Reduced from 15 - we now use exponential backoff
 	DefaultRetryTimeout = 2 * time.Second
+
+	DefaultConnectTimeout = 30 * time.Second
 )
 
 // Config holds the configuration for a Nefit Easy client.
@@ -31,6 +33,10 @@ type Config struct {
 	PingInterval time.Duration
 	MaxRetries   int
 	RetryTimeout time.Duration
+
+	// ConnectTimeout bounds a login. It runs apart from the request that
+	// triggered it, which may stop waiting sooner, so it needs its own bound.
+	ConnectTimeout time.Duration
 }
 
 // Validate ensures all required credentials are present.
@@ -63,6 +69,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.RetryTimeout == 0 {
 		c.RetryTimeout = DefaultRetryTimeout
+	}
+	if c.ConnectTimeout == 0 {
+		c.ConnectTimeout = DefaultConnectTimeout
 	}
 	return c
 }

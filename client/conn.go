@@ -10,7 +10,6 @@ import (
 )
 
 var (
-	errNotConnected   = errors.New("not connected")
 	errConnectionLost = errors.New("connection lost")
 	errClosed         = errors.New("client closed")
 )

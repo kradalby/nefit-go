@@ -113,10 +113,14 @@ func newHarness(t *testing.T, cfg Config) *harness {
 	c.SetLogger(slog.New(slog.DiscardHandler))
 
 	h := &harness{c: c, dials: make(chan *fakeTransport, 4)}
-	c.dial = func(context.Context) (transport, error) {
+	c.dial = func(ctx context.Context) (transport, error) {
 		f := newFakeTransport()
-		h.dials <- f
-		return f, nil
+		select {
+		case h.dials <- f:
+			return f, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -425,6 +429,63 @@ func TestRetryIgnoresLateReply(t *testing.T) {
 
 	if got := valueOf(t, wait(t, res)); got != "fresh" {
 		t.Errorf("value = %v, want fresh", got)
+	}
+}
+
+func TestRequestReconnectsAfterLoss(t *testing.T) {
+	h := newHarness(t, Config{})
+	f1 := h.connect(t)
+	f1.in <- io.ErrUnexpectedEOF
+	wait(t, h.c.Done())
+
+	res := h.get(t.Context(), types.URIOutdoorTemp)
+	f2 := wait(t, h.dials)
+	f2.request(t)
+	f2.in <- h.reply(t, types.URIOutdoorTemp, 2.0)
+	if got := valueOf(t, wait(t, res)); got != 2.0 {
+		t.Errorf("value = %v, want 2", got)
+	}
+}
+
+func TestConcurrentConnectsShareDial(t *testing.T) {
+	h := newHarness(t, Config{})
+	dialing := make(chan struct{}, 4)
+	release := make(chan struct{})
+	dial := h.c.dial
+	h.c.dial = func(ctx context.Context) (transport, error) {
+		dialing <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return dial(ctx)
+	}
+
+	errs := make(chan error, 2)
+	go func() { errs <- h.c.Connect(t.Context()) }()
+	wait(t, dialing)
+	// A request needing a session meanwhile joins the same dial.
+	res := h.get(t.Context(), types.URIOutdoorTemp)
+	go func() { errs <- h.c.Connect(t.Context()) }()
+	select {
+	case <-dialing:
+		t.Fatal("second dial while one was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	f := wait(t, h.dials)
+	for range 2 {
+		if err := wait(t, errs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.request(t)
+	f.in <- h.reply(t, types.URIOutdoorTemp, 4.0)
+	valueOf(t, wait(t, res))
+	if len(dialing) != 0 {
+		t.Error("dialed more than once")
 	}
 }
 
