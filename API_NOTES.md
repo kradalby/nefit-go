@@ -60,11 +60,10 @@ Example retry timeline:
 
 ### When Retries Happen
 
-Retries only occur for:
-- Timeout errors (`context.DeadlineExceeded`)
-- Network-related transient failures
+Retries only occur for attempts that timed out (`context.DeadlineExceeded`) before reaching the backend: queued behind other requests, or waiting for a login.
 
 Retries do NOT occur for:
+- A request that went out and got no reply in time. Replies carry no request id, so its late reply could answer the next request; the session is retired instead, and a retry would cost a fresh login and, with the gateway silent, time out the same way. The error still matches `context.DeadlineExceeded`.
 - HTTP 400 Bad Request (indicates invalid data)
 - HTTP 404 Not Found (indicates invalid endpoint)
 - HTTP 500+ Server Errors (typically indicates API or boiler issues)

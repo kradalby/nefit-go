@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestQueueSkipsRequestExpiredWhileQueued(t *testing.T) {
@@ -81,5 +82,27 @@ func TestQueueSubmitReturnsWhenClosed(t *testing.T) {
 	go q.Close()
 	if err := wait(t, queued); err == nil {
 		t.Error("request queued on a closed queue succeeded")
+	}
+}
+
+func TestQueueReportsOutcomeOfStartedRequest(t *testing.T) {
+	q := NewRequestQueue()
+	defer q.Close()
+
+	errSent := errors.New("sent")
+	ctx, cancel := context.WithCancel(t.Context())
+	got := make(chan error, 1)
+	go func() {
+		_, err := q.Submit(ctx, func() (any, error) {
+			cancel()
+			// Winding down after cancellation, as a request aborting its write does.
+			time.Sleep(50 * time.Millisecond)
+			return nil, errSent
+		})
+		got <- err
+	}()
+
+	if err := wait(t, got); !errors.Is(err, errSent) {
+		t.Errorf("Submit = %v, want the request's own error", err)
 	}
 }
