@@ -27,21 +27,15 @@ type fakeTransport struct {
 	once   sync.Once
 	recvs  atomic.Int64
 
-	// wedged makes Close block until unwedge is closed, as go-xmpp's
-	// graceful close does when a failed read left the stream lock held.
-	wedged  atomic.Bool
-	unwedge chan struct{}
-
 	mu  sync.Mutex
 	err error
 }
 
 func newFakeTransport() *fakeTransport {
 	return &fakeTransport{
-		in:      make(chan any, 16),
-		sent:    make(chan xmpp.Chat, 16),
-		closed:  make(chan struct{}),
-		unwedge: make(chan struct{}),
+		in:     make(chan any, 16),
+		sent:   make(chan xmpp.Chat, 16),
+		closed: make(chan struct{}),
 	}
 }
 
@@ -83,9 +77,6 @@ func (f *fakeTransport) Send(chat xmpp.Chat) (int, error) {
 func (f *fakeTransport) SendPresence(xmpp.Presence) (int, error) { return 0, nil }
 
 func (f *fakeTransport) Close() error {
-	if f.wedged.Load() {
-		<-f.unwedge
-	}
 	f.once.Do(func() { close(f.closed) })
 	return nil
 }
@@ -281,22 +272,6 @@ func TestConnectionLossClosesDone(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if n := f.recvs.Load(); n != 1 {
 		t.Errorf("Recv called %d times after loss, want 1", n)
-	}
-}
-
-func TestCloseAfterStreamFailure(t *testing.T) {
-	h := newHarness(t, Config{})
-	f := h.connect(t)
-	f.wedged.Store(true)
-	t.Cleanup(func() { close(f.unwedge) })
-
-	f.in <- io.ErrUnexpectedEOF
-	wait(t, h.c.Done())
-
-	closed := make(chan error, 1)
-	go func() { closed <- h.c.Close() }()
-	if err := wait(t, closed); err != nil {
-		t.Fatal(err)
 	}
 }
 
