@@ -47,6 +47,12 @@ func (q *RequestQueue) worker() {
 		case <-q.stopCh:
 			return
 		case req := <-q.requestCh:
+			// The caller has given up; sending now would only leave an
+			// orphaned reply on the wire.
+			if req.ctx.Err() != nil {
+				continue
+			}
+
 			value, err := req.execute()
 
 			select {
