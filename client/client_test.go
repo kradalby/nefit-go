@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -386,7 +387,7 @@ func TestReplyForOtherResourceIsNotTheAnswer(t *testing.T) {
 }
 
 func TestLateReplyIsNotAPush(t *testing.T) {
-	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond, MaxRetries: 1})
+	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond})
 	pushes := make(chan any, 8)
 	h.c.Subscribe(func(_ string, data any) {
 		pushes <- data.(map[string]any)["value"]
@@ -395,20 +396,16 @@ func TestLateReplyIsNotAPush(t *testing.T) {
 
 	res := h.get(t.Context(), types.URIStatus)
 	f1.request(t)
-	f2 := wait(t, h.dials)
-	f2.request(t)
 	if r := wait(t, res); r.err == nil {
 		t.Fatal("Get succeeded without a reply")
 	}
 
-	// Both attempts are answered after their callers gave up.
+	// Answered after the caller gave up.
 	f1.in <- h.reply(t, types.URIStatus, "late")
-	f2.in <- h.reply(t, types.URIStatus, "late")
 
-	// Get can return before the worker retires the session.
 	wait(t, h.c.Done())
-	f3 := h.connect(t)
-	f3.in <- h.reply(t, types.URIStatus, "push")
+	f2 := h.connect(t)
+	f2.in <- h.reply(t, types.URIStatus, "push")
 	if got := wait(t, pushes); got != "push" {
 		t.Errorf("push = %v, want the real push", got)
 	}
@@ -418,26 +415,21 @@ func TestLateReplyIsNotAPush(t *testing.T) {
 	}
 }
 
-func TestRetryIgnoresLateReply(t *testing.T) {
-	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond, MaxRetries: 1})
+func TestNextRequestIgnoresLateReply(t *testing.T) {
+	h := newHarness(t, Config{RetryTimeout: 200 * time.Millisecond})
 	f1 := h.connect(t)
 
-	res := h.get(t.Context(), types.URIStatus)
+	if r := wait(t, h.get(t.Context(), types.URIStatus)); r.err == nil {
+		t.Fatal("Get succeeded without a reply")
+	}
 	f1.request(t)
 
-	// The retry may go out on a fresh session.
-	f2 := f1
-	select {
-	case <-f1.sent:
-	case f2 = <-h.dials:
-		f2.request(t)
-	case <-time.After(5 * time.Second):
-		t.Fatal("no retry sent")
-	}
-
-	// The first attempt's reply overtakes the retry's; both name the
+	// The first request's reply overtakes the second's; both name the
 	// resource, and nothing else tells them apart.
+	res := h.get(t.Context(), types.URIStatus)
 	f1.in <- h.reply(t, types.URIStatus, "stale")
+	f2 := wait(t, h.dials)
+	f2.request(t)
 	f2.in <- h.reply(t, types.URIStatus, "fresh")
 
 	if got := valueOf(t, wait(t, res)); got != "fresh" {
@@ -497,6 +489,25 @@ func TestRequestReconnectsAfterLoss(t *testing.T) {
 	f2.in <- h.reply(t, types.URIOutdoorTemp, 2.0)
 	if got := valueOf(t, wait(t, res)); got != 2.0 {
 		t.Errorf("value = %v, want 2", got)
+	}
+}
+
+func TestUnansweredRequestIsNotRetried(t *testing.T) {
+	h := newHarness(t, Config{RetryTimeout: 100 * time.Millisecond, MaxRetries: 3})
+	f := h.connect(t)
+
+	r := wait(t, h.get(t.Context(), types.URIStatus))
+	if !errors.Is(r.err, context.DeadlineExceeded) {
+		t.Fatalf("Get error = %v, want deadline exceeded", r.err)
+	}
+	f.request(t)
+
+	// Every retry would cost a fresh login, and fail the same way while the
+	// gateway is silent.
+	select {
+	case <-h.dials:
+		t.Error("unanswered request retried on a new session")
+	default:
 	}
 }
 

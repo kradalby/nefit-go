@@ -12,6 +12,8 @@ import (
 var (
 	errConnectionLost = errors.New("connection lost")
 	errClosed         = errors.New("client closed")
+	// errUnanswered marks a request that went out and got no reply in time.
+	errUnanswered = errors.New("no reply")
 )
 
 // closedChan is what Done returns when there is no connection, so waiting on

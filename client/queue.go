@@ -4,14 +4,24 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 )
 
 var errQueueStopped = errors.New("queue is stopped")
+
+// A request leaves the queued state once: the worker starts it, or its
+// caller abandons it.
+const (
+	queued int32 = iota
+	started
+	abandoned
+)
 
 type requestItem struct {
 	ctx      context.Context
 	execute  func() (any, error)
 	resultCh chan requestResult
+	state    atomic.Int32
 }
 
 type requestResult struct {
@@ -22,7 +32,7 @@ type requestResult struct {
 // RequestQueue serializes requests to ensure only one runs at a time.
 // This is required by the Nefit backend, which can only handle one concurrent request.
 type RequestQueue struct {
-	requestCh chan requestItem
+	requestCh chan *requestItem
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	once      sync.Once
@@ -31,7 +41,7 @@ type RequestQueue struct {
 // NewRequestQueue creates and starts a new request queue with background worker.
 func NewRequestQueue() *RequestQueue {
 	q := &RequestQueue{
-		requestCh: make(chan requestItem, 100), // Buffer to handle bursts
+		requestCh: make(chan *requestItem, 100), // Buffer to handle bursts
 		stopCh:    make(chan struct{}),
 	}
 
@@ -59,28 +69,24 @@ func (q *RequestQueue) worker() {
 
 			// The caller has given up; sending now would only leave an
 			// orphaned reply on the wire.
-			if req.ctx.Err() != nil {
+			if req.ctx.Err() != nil || !req.state.CompareAndSwap(queued, started) {
 				continue
 			}
 
 			value, err := req.execute()
-
-			select {
-			case req.resultCh <- requestResult{value: value, err: err}:
-			case <-req.ctx.Done():
-			}
+			req.resultCh <- requestResult{value: value, err: err}
 		}
 	}
 }
 
-// Submit queues a request for execution and blocks until it completes or the context is cancelled.
+// Submit queues fn and returns its result. A request still queued when ctx
+// ends is dropped; one already running is waited for, so its own error tells
+// the caller how far it got. fn must therefore return promptly once ctx ends.
 func (q *RequestQueue) Submit(ctx context.Context, fn func() (any, error)) (any, error) {
-	resultCh := make(chan requestResult, 1)
-
-	req := requestItem{
+	req := &requestItem{
 		ctx:      ctx,
 		execute:  fn,
-		resultCh: resultCh,
+		resultCh: make(chan requestResult, 1),
 	}
 
 	select {
@@ -92,10 +98,19 @@ func (q *RequestQueue) Submit(ctx context.Context, fn func() (any, error)) (any,
 	}
 
 	select {
-	case result := <-resultCh:
+	case result := <-req.resultCh:
 		return result.value, result.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		if req.state.CompareAndSwap(queued, abandoned) {
+			return nil, ctx.Err()
+		}
+	case <-q.stopCh:
+		return nil, errQueueStopped
+	}
+
+	select {
+	case result := <-req.resultCh:
+		return result.value, result.err
 	case <-q.stopCh:
 		return nil, errQueueStopped
 	}

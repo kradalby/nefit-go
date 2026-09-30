@@ -405,8 +405,8 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 
 	if _, err := cn.xmpp.Send(chat); err != nil {
 		cn.close()
-		if err := ctx.Err(); err != nil {
-			return reply{}, err
+		if ctx.Err() != nil {
+			return reply{}, fmt.Errorf("%w: %w", errUnanswered, ctx.Err())
 		}
 		return reply{}, fmt.Errorf("failed to send message: %w", err)
 	}
@@ -415,8 +415,8 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 	case r := <-p.reply:
 		return r, r.err
 	case <-cn.ctx.Done():
-		if err := ctx.Err(); err != nil {
-			return reply{}, err
+		if ctx.Err() != nil {
+			return reply{}, fmt.Errorf("%w: %w", errUnanswered, ctx.Err())
 		}
 		return reply{}, errConnectionLost
 	}
@@ -434,11 +434,21 @@ func chatOf(msg string) (xmpp.Chat, error) {
 	return xmpp.Chat{Remote: stanza.To, Type: "chat", Text: stanza.Body}, nil
 }
 
+// retryable reports whether a failed attempt is worth repeating: it timed out
+// before reaching the backend. One that went out unanswered took its session
+// along, so a retry would cost a fresh login and, with the gateway silent,
+// fail the same way.
+func retryable(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errUnanswered)
+}
+
 // Get performs a GET request to the specified URI and returns the decrypted response data.
-// The method automatically retries on timeout and deserializes JSON responses.
+// It retries attempts that timed out before reaching the backend, and deserializes JSON responses.
 func (c *Client) Get(ctx context.Context, uri string) (any, error) {
 	var lastErr error
+	attempts := 0
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		attempts++
 		if attempt > 0 {
 			c.logger.Debug("retrying GET request", "uri", uri, "attempt", attempt)
 		}
@@ -455,16 +465,12 @@ func (c *Client) Get(ctx context.Context, uri string) (any, error) {
 
 		lastErr = err
 
-		if ctx.Err() != nil {
-			break
-		}
-
-		if err != context.DeadlineExceeded {
+		if ctx.Err() != nil || !retryable(err) {
 			break
 		}
 	}
 
-	return nil, fmt.Errorf("GET request failed after %d attempts: %w", c.config.MaxRetries, lastErr)
+	return nil, fmt.Errorf("GET request failed after %d attempts: %w", attempts, lastErr)
 }
 
 func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
@@ -486,7 +492,7 @@ func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
 
 // Put performs a PUT request to the specified URI with the given data.
 // Data is automatically marshalled to JSON and encrypted before sending.
-// The method uses exponential backoff for retries on transient errors.
+// It retries, with exponential backoff, attempts that timed out before reaching the backend.
 func (c *Client) Put(ctx context.Context, uri string, data any) error {
 	var jsonData string
 	switch v := data.(type) {
@@ -515,8 +521,10 @@ func (c *Client) Put(ctx context.Context, uri string, data any) error {
 		"encrypted_length", len(encrypted))
 
 	var lastErr error
+	attempts := 0
 	backoff := c.config.RetryTimeout
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		attempts++
 		if attempt > 0 {
 			c.logger.Debug("retrying PUT request",
 				"uri", uri,
@@ -559,8 +567,8 @@ func (c *Client) Put(ctx context.Context, uri string, data any) error {
 			break
 		}
 
-		// Only retry on timeout errors - 400 Bad Request indicates invalid data
-		if err != context.DeadlineExceeded && !strings.Contains(err.Error(), "timeout") {
+		// 400 Bad Request indicates invalid data
+		if !retryable(err) {
 			c.logger.Warn("PUT request failed with non-retryable error",
 				"uri", uri,
 				"error", err,
@@ -569,7 +577,7 @@ func (c *Client) Put(ctx context.Context, uri string, data any) error {
 		}
 	}
 
-	return fmt.Errorf("PUT request failed after %d attempts: %w", c.config.MaxRetries+1, lastErr)
+	return fmt.Errorf("PUT request failed after %d attempts: %w", attempts, lastErr)
 }
 
 func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData string) error {
