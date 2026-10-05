@@ -2,6 +2,7 @@
 package xmpp
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/xml"
 	"errors"
@@ -88,13 +89,15 @@ func (e Element) Text() string {
 }
 
 func (e Element) MarshalXML(enc *xml.Encoder, _ xml.StartElement) error {
-	return e.encode(enc, "", false)
+	return e.encode(enc, "", false, xml.Name{})
 }
 
 // EncodeInStream inherits the default jabber:client namespace from the stream.
-func (e Element) EncodeInStream(enc *xml.Encoder) error { return e.encode(enc, ClientNS, true) }
+func (e Element) EncodeInStream(enc *xml.Encoder) error {
+	return e.encode(enc, ClientNS, true, xml.Name{})
+}
 
-func (e Element) encode(enc *xml.Encoder, parent string, device bool) error {
+func (e Element) encode(enc *xml.Encoder, parent string, device bool, parentName xml.Name) error {
 	start := xml.StartElement{Name: xml.Name{Local: e.Name.Local}, Attr: append([]xml.Attr(nil), e.Attr...)}
 	childNamespace := e.Name.Space
 	if e.Name.Space == StreamNS {
@@ -104,7 +107,7 @@ func (e Element) encode(enc *xml.Encoder, parent string, device bool) error {
 	} else if e.Name.Space != parent {
 		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: e.Name.Space})
 	}
-	if device && e.Name == (xml.Name{Space: ClientNS, Local: "body"}) && len(e.Children) == 1 && e.Children[0].Element == nil && isHTTPBody(e.Children[0].Text) {
+	if device && parentName == (xml.Name{Space: ClientNS, Local: "message"}) && e.Name == (xml.Name{Space: ClientNS, Local: "body"}) && len(e.Children) == 1 && e.Children[0].Element == nil && isHTTPBody(e.Children[0].Text) {
 		text := strings.ReplaceAll(e.Children[0].Text, "\r\n", "\n")
 		text = strings.ReplaceAll(text, "\n", "\r\n")
 		return enc.EncodeElement(Body{Text: text}, start)
@@ -114,7 +117,7 @@ func (e Element) encode(enc *xml.Encoder, parent string, device bool) error {
 	}
 	for _, n := range e.Children {
 		if n.Element != nil {
-			if err := n.Element.encode(enc, childNamespace, device); err != nil {
+			if err := n.Element.encode(enc, childNamespace, device, e.Name); err != nil {
 				return err
 			}
 		} else {
@@ -146,9 +149,21 @@ func (e *Element) decode(d *xml.Decoder, start xml.StartElement, depth int) erro
 	e.Name = start.Name
 	e.Attr = nil
 	e.Children = nil
+	if err := validateAttributes(start.Attr); err != nil {
+		return err
+	}
 	for _, a := range start.Attr {
-		if a.Name.Space != "xmlns" && a.Name.Local != "xmlns" {
+		if !namespaceAttribute(a.Name) {
 			e.Attr = append(e.Attr, a)
+		}
+	}
+	var text strings.Builder
+	textSeen := false
+	flushText := func() {
+		if textSeen {
+			e.Children = append(e.Children, Node{Text: text.String()})
+			text.Reset()
+			textSeen = false
 		}
 	}
 	for {
@@ -158,18 +173,17 @@ func (e *Element) decode(d *xml.Decoder, start xml.StartElement, depth int) erro
 		}
 		switch v := token.(type) {
 		case xml.StartElement:
+			flushText()
 			child := new(Element)
 			if err := child.decode(d, v, depth+1); err != nil {
 				return err
 			}
 			e.Children = append(e.Children, Node{Element: child})
 		case xml.CharData:
-			if len(e.Children) > 0 && e.Children[len(e.Children)-1].Element == nil {
-				e.Children[len(e.Children)-1].Text += string(v)
-			} else {
-				e.Children = append(e.Children, Node{Text: string(v)})
-			}
+			textSeen = true
+			_, _ = text.Write(v)
 		case xml.EndElement:
+			flushText()
 			if v.Name != start.Name {
 				return errors.New("mismatched XML element")
 			}
@@ -203,11 +217,77 @@ type Frame struct {
 // scope without dropping decoder-buffered bytes or nesting the previous stream.
 type Reader struct {
 	d          *xml.Decoder
+	input      *frameInput
 	namespaces map[string]string
 }
 
 func NewReader(r io.Reader) *Reader {
-	return &Reader{d: xml.NewDecoder(r), namespaces: map[string]string{"xml": XMLNS}}
+	input := &frameInput{reader: bufio.NewReader(r)}
+	return &Reader{d: xml.NewDecoder(input), input: input, namespaces: map[string]string{"xml": XMLNS}}
+}
+
+// Implement ByteReader so the XML decoder cannot buffer an unbounded token
+// before checking the quota. Read-ahead in the underlying reader stays bounded.
+type frameInput struct {
+	reader    *bufio.Reader
+	remaining int
+}
+
+func (r *frameInput) ReadByte() (byte, error) {
+	if r.remaining == 0 {
+		return 0, errors.New("XMPP stanza exceeds size limit")
+	}
+	b, err := r.reader.ReadByte()
+	if err == nil {
+		r.remaining--
+	}
+	return b, err
+}
+
+func (r *frameInput) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	b, err := r.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+	p[0] = b
+	return 1, nil
+}
+
+func namespaceAttribute(name xml.Name) bool {
+	return name.Space == "xmlns" || name == (xml.Name{Local: "xmlns"})
+}
+
+func validateAttributes(attrs []xml.Attr) error {
+	seen := make(map[xml.Name]bool, len(attrs))
+	for _, a := range attrs {
+		if seen[a.Name] {
+			return fmt.Errorf("duplicate XML attribute %v", a.Name)
+		}
+		seen[a.Name] = true
+	}
+	return nil
+}
+
+func resolvedAttributes(attrs []xml.Attr, ns map[string]string) ([]xml.Attr, error) {
+	if err := validateAttributes(attrs); err != nil {
+		return nil, err
+	}
+	var result []xml.Attr
+	for _, a := range attrs {
+		if namespaceAttribute(a.Name) {
+			continue
+		}
+		var err error
+		a.Name, err = resolve(a.Name, ns, true)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, a)
+	}
+	return result, validateAttributes(result)
 }
 
 func scope(parent map[string]string, attrs []xml.Attr) map[string]string {
@@ -242,6 +322,7 @@ func resolve(name xml.Name, ns map[string]string, attr bool) (xml.Name, error) {
 }
 
 func (r *Reader) Next() (Frame, error) {
+	r.input.remaining = MaxStanzaBytes
 	for {
 		token, err := r.d.RawToken()
 		if err != nil {
@@ -275,34 +356,35 @@ func (r *Reader) Next() (Frame, error) {
 			}
 			if name == (xml.Name{Space: StreamNS, Local: "stream"}) {
 				ns = scope(map[string]string{"xml": XMLNS}, v.Attr)
+				attrs, err := resolvedAttributes(v.Attr, ns)
+				if err != nil {
+					return Frame{}, err
+				}
 				r.namespaces = ns
 				s := new(Stream)
-				for _, a := range v.Attr {
-					switch a.Name.Local {
-					case "from":
+				for _, a := range attrs {
+					switch a.Name {
+					case xml.Name{Local: "from"}:
 						s.From = a.Value
-					case "to":
+					case xml.Name{Local: "to"}:
 						s.To = a.Value
-					case "id":
+					case xml.Name{Local: "id"}:
 						s.ID = a.Value
-					case "version":
+					case xml.Name{Local: "version"}:
 						s.Version = a.Value
-					case "lang":
-						if a.Name.Space == "xml" {
-							s.Lang = a.Value
-						}
+					case xml.Name{Space: XMLNS, Local: "lang"}:
+						s.Lang = a.Value
 					}
 				}
 				return Frame{Stream: s}, nil
 			}
-			offset := r.d.InputOffset()
-			element, err := r.element(v, ns, 0, offset)
+			element, err := r.element(v, ns, 0)
 			return Frame{Element: element}, err
 		}
 	}
 }
 
-func (r *Reader) element(start xml.StartElement, ns map[string]string, depth int, offset int64) (*Element, error) {
+func (r *Reader) element(start xml.StartElement, ns map[string]string, depth int) (*Element, error) {
 	if depth > 64 {
 		return nil, errors.New("XML nesting limit exceeded")
 	}
@@ -310,39 +392,38 @@ func (r *Reader) element(start xml.StartElement, ns map[string]string, depth int
 	if err != nil {
 		return nil, err
 	}
-	e := &Element{Name: name}
-	for _, a := range start.Attr {
-		if a.Name.Space == "xmlns" || a.Name.Local == "xmlns" {
-			continue
+	attrs, err := resolvedAttributes(start.Attr, ns)
+	if err != nil {
+		return nil, err
+	}
+	e := &Element{Name: name, Attr: attrs}
+	var text strings.Builder
+	textSeen := false
+	flushText := func() {
+		if textSeen {
+			e.Children = append(e.Children, Node{Text: text.String()})
+			text.Reset()
+			textSeen = false
 		}
-		a.Name, err = resolve(a.Name, ns, true)
-		if err != nil {
-			return nil, err
-		}
-		e.Attr = append(e.Attr, a)
 	}
 	for {
 		token, err := r.d.RawToken()
 		if err != nil {
 			return nil, err
 		}
-		if r.d.InputOffset()-offset > MaxStanzaBytes {
-			return nil, errors.New("XMPP stanza exceeds size limit")
-		}
 		switch v := token.(type) {
 		case xml.StartElement:
-			child, err := r.element(v, scope(ns, v.Attr), depth+1, offset)
+			flushText()
+			child, err := r.element(v, scope(ns, v.Attr), depth+1)
 			if err != nil {
 				return nil, err
 			}
 			e.Children = append(e.Children, Node{Element: child})
 		case xml.CharData:
-			if len(e.Children) > 0 && e.Children[len(e.Children)-1].Element == nil {
-				e.Children[len(e.Children)-1].Text += string(v)
-			} else {
-				e.Children = append(e.Children, Node{Text: string(v)})
-			}
+			textSeen = true
+			_, _ = text.Write(v)
 		case xml.EndElement:
+			flushText()
 			if v.Name != start.Name {
 				return nil, errors.New("mismatched closing element")
 			}
@@ -413,7 +494,7 @@ func CompactEmpty(raw []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if end, ok := token.(xml.EndElement); ok && wasStart && end.Name == previous.Name {
+		if end, ok := token.(xml.EndElement); ok && wasStart && end.Name == previous.Name && int(d.InputOffset()) > previousEnd {
 			edits = append(edits, edit{previousEnd - 1, int(d.InputOffset())})
 		}
 		previous, wasStart = token.(xml.StartElement)
@@ -439,6 +520,7 @@ func DeviceXML(raw []byte) ([]byte, error) {
 	}
 	d := xml.NewDecoder(strings.NewReader(string(raw)))
 	var path []xml.Name
+	namespaces := []map[string]string{{"": ClientNS, "xml": XMLNS}}
 	var result []byte
 	offset := 0
 	for {
@@ -453,13 +535,20 @@ func DeviceXML(raw []byte) ([]byte, error) {
 		end := int(d.InputOffset())
 		switch v := token.(type) {
 		case xml.StartElement:
-			path = append(path, v.Name)
+			ns := scope(namespaces[len(namespaces)-1], v.Attr)
+			name, err := resolve(v.Name, ns, false)
+			if err != nil {
+				return nil, err
+			}
+			namespaces = append(namespaces, ns)
+			path = append(path, name)
 		case xml.EndElement:
 			if len(path) > 0 {
 				path = path[:len(path)-1]
+				namespaces = namespaces[:len(namespaces)-1]
 			}
 		case xml.CharData:
-			if len(path) > 0 && path[len(path)-1].Local == "body" && isHTTPBody(string(v)) {
+			if len(path) >= 2 && path[len(path)-1] == (xml.Name{Space: ClientNS, Local: "body"}) && path[len(path)-2] == (xml.Name{Space: ClientNS, Local: "message"}) && isHTTPBody(string(v)) {
 				result = append(result, raw[offset:begin]...)
 				text := strings.NewReplacer("&#xD;", "\r", "&#xA;", "\n", "&#13;", "\r", "&#10;", "\n").Replace(string(raw[begin:end]))
 				result = append(result, text...)

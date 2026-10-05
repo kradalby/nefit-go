@@ -53,9 +53,10 @@ type Presence struct {
 }
 type SASL struct {
 	XMLName    xml.Name
-	Mechanism  string    `xml:"mechanism,attr,omitempty"`
-	Text       string    `xml:",chardata"`
-	Extensions []Element `xml:",any"`
+	Mechanism  string     `xml:"mechanism,attr,omitempty"`
+	Text       string     `xml:",chardata"`
+	Extensions []Element  `xml:",any"`
+	Attr       []xml.Attr `xml:",any,attr"`
 }
 
 func Auth(mechanism string) SASL {
@@ -106,45 +107,83 @@ func (e Element) Typed() (any, error) {
 	return v, xml.Unmarshal(raw, v)
 }
 
-func attrsWithoutNamespaces(attrs []xml.Attr) []xml.Attr {
-	var result []xml.Attr
-	for _, a := range attrs {
-		if a.Name.Local != "xmlns" && a.Name.Space != "xmlns" {
-			result = append(result, a)
+// encoding/xml matches unqualified attribute tags by local name. Separate
+// foreign attributes before decoding so they cannot replace routing fields.
+func typedAttributes(start xml.StartElement) (xml.StartElement, []xml.Attr, error) {
+	if err := validateAttributes(start.Attr); err != nil {
+		return start, nil, err
+	}
+	var attrs, foreign []xml.Attr
+	for _, a := range start.Attr {
+		if namespaceAttribute(a.Name) {
+			continue
+		}
+		if a.Name.Space == "" || a.Name == (xml.Name{Space: XMLNS, Local: "lang"}) {
+			attrs = append(attrs, a)
+		} else {
+			foreign = append(foreign, a)
 		}
 	}
-	return result
+	start.Attr = attrs
+	return start, foreign, nil
 }
 
 func (m *Message) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	start, foreign, err := typedAttributes(start)
+	if err != nil {
+		return err
+	}
 	type plain Message
 	var value plain
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
-	value.Attr = attrsWithoutNamespaces(value.Attr)
+	value.Attr = append(value.Attr, foreign...)
 	*m = Message(value)
 	return nil
 }
 
 func (m *IQ) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	start, foreign, err := typedAttributes(start)
+	if err != nil {
+		return err
+	}
 	type plain IQ
 	var value plain
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
-	value.Attr = attrsWithoutNamespaces(value.Attr)
+	value.Attr = append(value.Attr, foreign...)
 	*m = IQ(value)
 	return nil
 }
 
 func (m *Presence) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	start, foreign, err := typedAttributes(start)
+	if err != nil {
+		return err
+	}
 	type plain Presence
 	var value plain
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
-	value.Attr = attrsWithoutNamespaces(value.Attr)
+	value.Attr = append(value.Attr, foreign...)
 	*m = Presence(value)
+	return nil
+}
+
+func (m *SASL) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	start, foreign, err := typedAttributes(start)
+	if err != nil {
+		return err
+	}
+	type plain SASL
+	var value plain
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	value.Attr = append(value.Attr, foreign...)
+	*m = SASL(value)
 	return nil
 }

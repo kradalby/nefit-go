@@ -82,9 +82,9 @@ go run ./cmd/nefit --timeout 15s serve --mode both \
   --http-listen 127.0.0.1:8088 --updates allow
 ```
 
-Use `--mode offline` for local control without a Bosch control connection. In `both`, a failed upstream dial falls back to offline operation. If Bosch disconnects after login, local control remains available. Restoring cloud authentication requires a device reconnect: the server periodically checks reachability and retires the device session when Bosch is reachable again. In-progress requests may fail during that transition; writes are not automatically replayed.
+Use `--mode offline` for local control without a Bosch control connection. In `both`, a failed upstream dial falls back to offline operation. If Bosch disconnects after login, local control remains available. An outstanding device request keeps its place until answered or timed out; an expired unsent local request does not interrupt the shared session. Restoring cloud authentication requires a device reconnect: the server periodically checks reachability and retires the device session when Bosch is reachable again. In-progress requests may fail during that transition; writes are not automatically replayed. API requests received during login wait until authentication completes, then share the same device queue.
 
-`--updates block` rejects writes under `/gateway/update` and drops traffic for `gservice_update` and `gservice_firmware`. `--update-services` adds comma-separated service JIDs/localparts. Firmware-version and update-strategy reads remain available. This policy covers XMPP traffic; independent downloads and unobserved update mechanisms require network egress rules. No actual firmware update transaction has been captured, so a complete firmware freeze is not established.
+`--updates block` rejects writes under `/gateway/update` and drops traffic for `gservice_update` and `gservice_firmware`. `--update-services` adds comma-separated service JIDs/localparts. The policy checks every body and applies during authentication and to offline service responses. Policy rejection leaves the connection available. Firmware-version and update-strategy reads remain available. This policy covers XMPP traffic; independent downloads and unobserved update mechanisms require network egress rules. No actual firmware update transaction has been captured, so a complete firmware freeze is not established.
 
 The HTTP API includes:
 
@@ -98,6 +98,8 @@ The HTTP API includes:
 | `/api/user-mode` | PUT | `{"value":"manual"}` or `{"value":"clock"}` |
 | `/<thermostat-path>` | GET, PUT | decrypted device JSON; PUT JSON value |
 | `/bridge/<thermostat-path>` | GET, PUT, POST | compatibility alias for raw API |
+
+HTTP writes require `Content-Type: application/json`. Raw writes preserve the supplied JSON value, including strings and large integers. Cross-origin browser writes are rejected; same-origin browsers and nonbrowser clients remain supported.
 
 Embed the same server without HTTP:
 
@@ -134,7 +136,7 @@ nefit serve --mode offline --device-ip 192.168.156.96 \
   --dns-listen 10.65.0.27:53 --dns-address 10.65.0.27
 ```
 
-Configure the device's resolver/DHCP DNS to use it. Unrelated names are refused unless `--dns-forward resolver:53` is set. Missing address-family records return no data, preventing an IPv6 record from bypassing a local IPv4 override. DNS proxy peers can be admitted explicitly through `server.DNSConfig.AllowedPeers` when embedding. The DNS endpoint does not advertise DHCP or take over an existing resolver automatically.
+Configure the device's resolver/DHCP DNS to use it. Unrelated names are refused unless `--dns-forward resolver:53` is set. Missing address-family records return no data, preventing an IPv6 record from bypassing a local IPv4 override. DNS proxy peers can be admitted explicitly through `server.DNSConfig.AllowedPeers` when embedding. SRV answers use the actual bound XMPP port unless `server.DNSConfig.XMPPPort` overrides it. Forwarded TCP queries use TCP upstream, allowing retries after truncated UDP answers. The DNS endpoint does not advertise DHCP or take over an existing resolver automatically.
 
 If DNS cannot be changed, redirect the thermostat's outbound TCP/5222 to the XMPP listener. On UniFi, use destination NAT on IoT ingress: source device IP, destination any, TCP port 5222, translated local server IP. Allow that device to reach the listener across VLANs. Changing the destination IP match alone does not redirect the cloud connection. A dedicated access point/router with its own DNS is another option when the main router cannot be configured. ARP spoofing and rogue DHCP are not supported installation methods.
 

@@ -391,21 +391,31 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 	// before sending: the reply may beat Send's return.
 	p := &pending{uri: uri, get: get, reply: make(chan reply, 1)}
 	cn.begin(p)
+	defer cn.abandon(p)
 
-	// From here the request may reach the backend, whose replies carry no
-	// request id: if it fails, its late reply would pass for the answer to
-	// the next, so the session goes with it. Closing also aborts a write the
-	// peer stopped reading.
-	stop := context.AfterFunc(ctx, cn.close)
-	defer stop()
-
-	if _, err := cn.xmpp.Send(chat); err != nil {
+	// Replies carry no request id. Unsent requests preserve the session; once
+	// writing starts, failure must retire it to prevent a late reply from
+	// answering the next request. Closing also aborts a stalled write.
+	if sender, ok := cn.xmpp.(contextSender); ok {
+		_, err = sender.SendContext(ctx, chat)
+	} else {
+		stop := context.AfterFunc(ctx, cn.close)
+		_, err = cn.xmpp.Send(chat)
+		stop()
+	}
+	if err != nil {
+		var unsent *unsentError
+		if errors.As(err, &unsent) {
+			return reply{}, fmt.Errorf("request not sent: %w", err)
+		}
 		cn.close()
 		if ctx.Err() != nil {
 			return reply{}, fmt.Errorf("%w: %w", errUnanswered, ctx.Err())
 		}
 		return reply{}, fmt.Errorf("failed to send message: %w", err)
 	}
+	stop := context.AfterFunc(ctx, cn.close)
+	defer stop()
 
 	select {
 	case r := <-p.reply:
@@ -418,7 +428,7 @@ func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (repl
 	}
 }
 
-// chatOf unwraps the message stanza protocol builds, for go-xmpp to rewrap.
+// chatOf extracts the API request for the transport's typed stanza encoder.
 func chatOf(msg string) (xmpp.Chat, error) {
 	var stanza struct {
 		To   string `xml:"to,attr"`

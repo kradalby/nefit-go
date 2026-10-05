@@ -46,6 +46,13 @@ repos:
         types: [go]
         pass_filenames: false
 
+      - id: research-tests
+        name: corpus sanitizer tests
+        entry: python3 -m unittest discover -s research -p test_*.py
+        language: system
+        files: ^research/.*\.py$
+        pass_filenames: false
+
       - id: go-mod-tidy
         name: go mod tidy
         entry: go mod tidy

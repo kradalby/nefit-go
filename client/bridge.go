@@ -36,6 +36,7 @@ type bridgeState struct {
 	logger            *slog.Logger
 	runOnce           sync.Once
 	deliveries        chan bridgeDelivery
+	initialRequests   []bridgeRequest
 }
 type (
 	bridgeDelivery struct {
@@ -55,6 +56,8 @@ type (
 		message wire.Message
 		element *wire.Element
 		sent    chan sendResult
+		ctx     context.Context
+		state   *atomic.Int32
 	}
 	activeRequest struct {
 		request     bridgeRequest
@@ -121,7 +124,23 @@ func acceptBoth(ctx context.Context, device net.Conn, cfg Config, options LocalO
 			if event.frame.End {
 				return fail(io.EOF)
 			}
+			if t.blockedFrame(event.frame) {
+				continue
+			}
 			if event.cloud {
+				if e := event.frame.Element; e != nil && e.Name == (xml.Name{Space: wire.ClientNS, Local: "message"}) {
+					m, err := bridgeMessage(e)
+					if err != nil {
+						return fail(err)
+					}
+					if method, _ := requestLine(m.Body.Text); method != "" {
+						if len(t.initialRequests) >= 64 {
+							return fail(errors.New("cloud device request queue full during login"))
+						}
+						t.initialRequests = append(t.initialRequests, bridgeRequest{message: *m, element: e})
+						continue
+					}
+				}
 				if _, err = t.write(event.frame); err != nil {
 					return fail(err)
 				}
@@ -192,16 +211,27 @@ func (t *localTransport) toCloud(frame wire.Frame) error {
 	return err
 }
 
-func (t *localTransport) submit(m wire.Message) (int, error) {
-	r := bridgeRequest{message: m, sent: make(chan sendResult, 1)}
+func (t *localTransport) submit(ctx context.Context, m wire.Message) (int, error) {
+	r := bridgeRequest{message: m, sent: make(chan sendResult, 1), ctx: ctx, state: new(atomic.Int32)}
+	abort := func() (int, error) {
+		if r.state.CompareAndSwap(queued, abandoned) || r.state.Load() == abandoned {
+			return 0, &unsentError{ctx.Err()}
+		}
+		_ = t.Close()
+		return 0, ctx.Err()
+	}
 	select {
 	case t.requests <- r:
+	case <-ctx.Done():
+		return abort()
 	case <-t.ctx.Done():
 		return 0, t.ctx.Err()
 	}
 	select {
 	case result := <-r.sent:
 		return result.n, result.err
+	case <-ctx.Done():
+		return abort()
 	case <-t.ctx.Done():
 		return 0, t.ctx.Err()
 	}
@@ -247,17 +277,70 @@ func (t *localTransport) blocked(m wire.Message) bool {
 	return method != "" && method != "GET" && method != "HEAD" && (uri == "/gateway/update" || strings.HasPrefix(uri, "/gateway/update/"))
 }
 
-func (t *localTransport) rejectCloud(m wire.Message) error {
-	response := wire.Message{From: m.To, To: m.From, Type: "chat", Body: wire.Body{Text: "HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n"}}
-	raw, err := xml.Marshal(response)
+func (t *localTransport) blockedFrame(frame wire.Frame) bool {
+	e := frame.Element
+	if e == nil {
+		return false
+	}
+	if t.blockedService(e.Get("from"), e.Get("to")) {
+		return true
+	}
+	if e.Name != (xml.Name{Space: wire.ClientNS, Local: "message"}) {
+		return false
+	}
+	// Inspect the preserved tree: typed decoding selects the last body, while
+	// relaying retains all bodies, including language alternatives.
+	for _, node := range e.Children {
+		if body := node.Element; body != nil && body.Name == (xml.Name{Space: wire.ClientNS, Local: "body"}) {
+			if t.blocked(wire.Message{From: e.Get("from"), To: e.Get("to"), Body: wire.Body{Text: body.Text()}}) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// API messages have one body. Ambiguous alternatives cannot be scheduled using
+// one outstanding request while preserving their complete XML for forwarding.
+func bridgeMessage(e *wire.Element) (*wire.Message, error) {
+	bodies, requests := 0, 0
+	for _, node := range e.Children {
+		if body := node.Element; body != nil && body.Name == (xml.Name{Space: wire.ClientNS, Local: "body"}) {
+			bodies++
+			if method, _ := requestLine(body.Text()); method != "" {
+				requests++
+			}
+		}
+	}
+	if requests != 0 && bodies != 1 {
+		return nil, errors.New("multiple HTTP-over-XMPP bodies")
+	}
+	value, err := e.Typed()
 	if err != nil {
-		return err
+		return nil, err
+	}
+	return value.(*wire.Message), nil
+}
+
+func messageFrame(m wire.Message) (wire.Frame, error) {
+	raw, err := xml.Marshal(m)
+	if err != nil {
+		return wire.Frame{}, err
 	}
 	var e wire.Element
 	if err = xml.Unmarshal(raw, &e); err != nil {
+		return wire.Frame{}, err
+	}
+	return wire.Frame{Element: &e}, nil
+}
+
+func (t *localTransport) rejectCloud(m wire.Message) error {
+	response := wire.Message{From: m.To, To: m.From, Type: "chat", Body: wire.Body{Text: "HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n"}}
+	frame, err := messageFrame(response)
+	if err != nil {
 		return err
 	}
-	return t.toCloud(wire.Frame{Element: &e})
+	return t.toCloud(frame)
 }
 
 func (t *localTransport) requestMatches(active *activeRequest, m *wire.Message) bool {
@@ -315,32 +398,64 @@ func (t *localTransport) recvBoth() (any, error) {
 }
 
 func (t *localTransport) runBridge() error {
-	var queue []bridgeRequest
+	queue := t.initialRequests
+	t.initialRequests = nil
 	var active *activeRequest
 	timer := time.NewTicker(100 * time.Millisecond)
 	defer timer.Stop()
 	probe := time.NewTicker(t.options.ReconnectInterval)
 	defer probe.Stop()
 	sendNext := func() error {
-		if active != nil || len(queue) == 0 {
-			return nil
+		var r bridgeRequest
+		for {
+			if active != nil || len(queue) == 0 {
+				return nil
+			}
+			r = queue[0]
+			queue = queue[1:]
+			if r.state == nil {
+				break
+			}
+			if r.ctx.Err() != nil {
+				r.state.CompareAndSwap(queued, abandoned)
+			}
+			if r.state.Load() == queued {
+				break
+			}
 		}
-		r := queue[0]
-		queue = queue[1:]
 		method, uri := requestLine(r.message.Body.Text)
 		var value any = r.message
 		if r.element != nil {
 			value = wire.Frame{Element: r.element}
 		}
-		n, err := t.write(value)
+		ctx := t.ctx
+		if r.ctx != nil {
+			ctx = r.ctx
+		}
+		n, err := t.writeContext(ctx, value, r.state)
 		if r.sent != nil {
 			r.sent <- sendResult{n, err}
 		}
 		if err != nil {
+			var unsent *unsentError
+			if errors.As(err, &unsent) {
+				return nil
+			}
 			return err
 		}
 		active = &activeRequest{request: r, method: method, uri: uri, deadline: time.Now().Add(t.options.RequestTimeout)}
 		return nil
+	}
+	disconnectCloud := func() {
+		if t.upstreamConnected.Swap(false) {
+			_ = t.upstream.Close()
+			if t.logger != nil {
+				t.logger.Warn("Bosch connection lost; local service remains available")
+			}
+		}
+		// The device still owes an active cloud request its reply. Dropping only
+		// unsent cloud requests keeps the single-request constraint intact.
+		queue = removeCloudRequests(queue)
 	}
 	for {
 		if err := sendNext(); err != nil {
@@ -351,11 +466,11 @@ func (t *localTransport) runBridge() error {
 			return t.ctx.Err()
 		case r := <-t.requests:
 			if t.blocked(r.message) {
-				r.sent <- sendResult{err: errors.New("firmware update write blocked by policy")}
+				r.sent <- sendResult{err: &unsentError{errors.New("firmware update write blocked by policy")}}
 				continue
 			}
 			if len(queue) >= 64 {
-				r.sent <- sendResult{err: errors.New("device request queue full")}
+				r.sent <- sendResult{err: &unsentError{errors.New("device request queue full")}}
 				continue
 			}
 			queue = append(queue, r)
@@ -388,6 +503,9 @@ func (t *localTransport) runBridge() error {
 			return errors.New("cloud recovered; reconnecting device for gateway authentication")
 
 		case event := <-t.inputs:
+			if event.cloud && !t.upstreamConnected.Load() {
+				continue
+			}
 			if event.err != nil || event.frame.End {
 				if !event.cloud {
 					if event.err != nil {
@@ -395,15 +513,7 @@ func (t *localTransport) runBridge() error {
 					}
 					return io.EOF
 				}
-				t.upstreamConnected.Store(false)
-				_ = t.upstream.Close()
-				if t.logger != nil {
-					t.logger.Warn("Bosch connection lost; local service remains available")
-				}
-				queue = removeCloudRequests(queue)
-				if active != nil && active.request.sent == nil {
-					active = nil
-				}
+				disconnectCloud()
 				continue
 			}
 			if event.frame.Stream != nil {
@@ -416,20 +526,23 @@ func (t *localTransport) runBridge() error {
 			if t.blockedService(e.Get("from"), e.Get("to")) {
 				continue
 			}
+			if t.blockedFrame(event.frame) {
+				if event.cloud && e.Name == (xml.Name{Space: wire.ClientNS, Local: "message"}) {
+					if err := t.rejectCloud(wire.Message{From: e.Get("from"), To: e.Get("to")}); err != nil {
+						disconnectCloud()
+					}
+				}
+				continue
+			}
 			if event.cloud {
+				if e.Name == (xml.Name{Space: wire.StreamNS, Local: "error"}) {
+					disconnectCloud()
+					continue
+				}
 				if e.Name == (xml.Name{Space: wire.ClientNS, Local: "message"}) {
-					value, err := e.Typed()
+					m, err := bridgeMessage(e)
 					if err != nil {
 						return err
-					}
-					m := value.(*wire.Message)
-					if t.blocked(*m) {
-						if method, _ := requestLine(m.Body.Text); method != "" {
-							if err := t.rejectCloud(*m); err != nil {
-								return err
-							}
-						}
-						continue
 					}
 					method, _ := requestLine(m.Body.Text)
 					if method != "" {
@@ -448,11 +561,10 @@ func (t *localTransport) runBridge() error {
 				continue
 			}
 			if e.Name == (xml.Name{Space: wire.ClientNS, Local: "message"}) {
-				value, err := e.Typed()
+				m, err := bridgeMessage(e)
 				if err != nil {
 					return err
 				}
-				m := value.(*wire.Message)
 				if t.requestMatches(active, m) {
 					active = nil
 				}
@@ -464,13 +576,9 @@ func (t *localTransport) runBridge() error {
 					}
 					continue
 				}
-				if t.blocked(*m) {
-					continue
-				}
 				if t.upstreamConnected.Load() {
 					if err := t.toCloud(event.frame); err != nil {
-						t.upstreamConnected.Store(false)
-						_ = t.upstream.Close()
+						disconnectCloud()
 					}
 				} else {
 					if err := t.service(*m); err != nil {
@@ -480,9 +588,10 @@ func (t *localTransport) runBridge() error {
 			} else {
 				if t.upstreamConnected.Load() {
 					if err := t.toCloud(event.frame); err != nil {
-						return err
+						disconnectCloud()
 					}
-				} else if e.Name == (xml.Name{Space: wire.ClientNS, Local: "iq"}) && e.Child(wire.PingNS, "ping") != nil {
+				}
+				if !t.upstreamConnected.Load() && e.Name == (xml.Name{Space: wire.ClientNS, Local: "iq"}) && e.Child(wire.PingNS, "ping") != nil {
 					if _, err := t.write(wire.IQ{Type: "result", ID: e.Get("id"), From: e.Get("to"), To: e.Get("from")}); err != nil {
 						return err
 					}

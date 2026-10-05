@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -44,6 +45,10 @@ func (c *cloudFixture) next(t *testing.T) *wire.Element {
 }
 
 func bothTestClient(t *testing.T, policy UpdatePolicy) (*Client, *deviceFixture, *cloudFixture) {
+	return bothHandshakeClient(t, policy, nil, nil)
+}
+
+func bothHandshakeClient(t *testing.T, policy UpdatePolicy, cloudHook func(*cloudFixture, wire.Frame), deviceHook func(*deviceFixture)) (*Client, *deviceFixture, *cloudFixture) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -65,6 +70,13 @@ func bothTestClient(t *testing.T, policy UpdatePolicy) (*Client, *deviceFixture,
 			f, err := cloud.reader.Next()
 			if err != nil {
 				handshakeErr <- err
+				return
+			}
+			if f.Element != nil && f.Element.Get("id") == "service-control" {
+				continue
+			}
+			if f.Element != nil && f.Element.Get("id") == "blocked-handshake" {
+				handshakeErr <- errors.New("device update passed handshake policy")
 				return
 			}
 			var response any
@@ -104,6 +116,9 @@ func bothTestClient(t *testing.T, policy UpdatePolicy) (*Client, *deviceFixture,
 				handshakeErr <- err
 				return
 			}
+			if cloudHook != nil {
+				cloudHook(cloud, f)
+			}
 		}
 	}()
 	c, err := NewLocalClient(Config{SerialNumber: "123456789", AccessKey: "abcdefghijklmnop", Password: "secret", RetryTimeout: 3 * time.Second, ConnectTimeout: 3 * time.Second, PingInterval: time.Hour}, LocalOptions{ListenAddress: "127.0.0.1:0", DeviceIP: net.ParseIP("127.0.0.1"), Mode: ModeBoth, UpstreamAddress: ln.Addr().String(), UpdatePolicy: policy, RequestTimeout: 3 * time.Second, ReconnectInterval: time.Hour})
@@ -112,7 +127,7 @@ func bothTestClient(t *testing.T, policy UpdatePolicy) (*Client, *deviceFixture,
 	}
 	c.SetLogger(slog.New(slog.DiscardHandler))
 	t.Cleanup(func() { _ = c.Close() })
-	d := connectFixture(t, c)
+	d := connectHandshakeFixture(t, c, deviceHook)
 	select {
 	case cloud := <-cloudReady:
 		t.Cleanup(func() { _ = cloud.conn.Close() })

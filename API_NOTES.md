@@ -215,8 +215,10 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 - The client owns connecting. A request with no live session logs in on its own; `Connect()` does the same ahead of time, which is what lets push notifications arrive before the first request.
 - One login runs at a time. Requests and `Connect()` calls that need a session meanwhile wait for it rather than start another. A caller that gives up does not abort it; `ConnectTimeout` (default 30s) and `Close()` do.
 - `Done()` is closed when the session ends: the stream fails, `Close()` is called, or a request fails after it may have gone out. To keep pushes flowing, wait on `Done()` and call `Connect()` again, with backoff.
+- Requests that expire before writing, including while waiting behind cloud requests in `both`, preserve the session. Update-policy rejections also preserve it. A request that may have reached the device and goes unanswered still retires the session to prevent late-reply misrouting.
 - `Connect()` returning nil means a session was established; it may already have ended, so watch `Done()` rather than assume it is up.
 - A half-open connection (the peer vanished without closing) is noticed only when a request goes unanswered, or when the kernel gives up retransmitting a keepalive presence, which takes minutes. There is no read deadline; pushes stop silently until then. Poll with a request to notice sooner.
+- API requests received during gateway login are queued until login completes. HTTP requests with multiple bodies are rejected as ambiguous; ordinary messages with language alternatives still relay intact.
 - The cloud and device transports own every socket and use the shared typed XML codec. Cloud contact authentication runs only inside verified STARTTLS; device gateway authentication is relayed in `both` mode.
 
 ## Known limits
@@ -224,7 +226,7 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 - HTTP proxy environment variables and XMPP host redirects are unsupported; they cannot create sockets outside the client's lifecycle.
 - Offline device authentication relies on source IP and gateway identity, not verification of the gateway's unknown DIGEST-MD5 secret.
 - Time/weather service encryption remains unresolved offline. `both` forwards those services.
-- Firmware blocking applies to configured XMPP services and update writes. Downloads outside XMPP and actual update transactions have not been validated.
+- Firmware blocking applies to configured XMPP services and update writes throughout authentication and established sessions. Downloads outside XMPP and actual update transactions have not been validated.
 - DNS takeover and cold boot without internet require gateway-side DNS evidence and hardware testing. The optional DNS endpoint's UDP/TCP behavior is covered by tests.
 
 ## Production Recommendations

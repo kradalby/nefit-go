@@ -67,7 +67,11 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{Client: c, mode: mode, closed: make(chan struct{})}
 	if cfg.DNS != nil {
-		s.dns, err = NewDNS(*cfg.DNS)
+		dnsConfig := *cfg.DNS
+		if dnsConfig.XMPPPort == 0 {
+			dnsConfig.XMPPPort = uint16(c.LocalAddress().(*net.TCPAddr).Port)
+		}
+		s.dns, err = NewDNS(dnsConfig)
 		if err != nil {
 			_ = c.Close()
 			return nil, err
