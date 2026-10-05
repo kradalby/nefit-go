@@ -1,0 +1,107 @@
+{
+  "target": "192.168.156.96",
+  "observed_at_utc": "2026-10-05",
+  "workstation_address": "10.65.0.27",
+  "route": "via 10.65.0.1 dev enp5s0",
+  "observations": [
+    "ICMP replies received; approximately 3 milliseconds round-trip, TTL 254.",
+    "TCP connect scan of top 1000 ports: 80 open, 996 closed, 100/1031/1812 initially filtered; targeted retry found all three closed.",
+    "Additional closed TCP ports: 81, 88, 1883, 5000, 5683, 8000, 8883, 9000, 10000, 20000.",
+    "Port 80 resets immediately after handshake without application bytes. HTTP/1.0, HTTP/1.1, NefitEasy user agent and CR-only XMPP-style GET also reset. No HTTP response obtained.",
+    "Raw packet observation confirms SYN-ACK then RST-ACK from the target address on port 80; both have TTL 254. These observations alone do not identify whether the device or an intermediate network component generated replies.",
+    "After UniFi IoT-ingress DNAT and an inter-network TCP/5222 firewall allowance, a device connection reached 10.65.0.27:5222 with source 192.168.156.96.",
+    "Transparent relay to the library default Bosch endpoint observed successful device DIGEST-MD5 authentication, resource binding to RRC-RestApi, session establishment and presence.",
+    "Device did not request STARTTLS despite the server advertising it; this observed device session is plaintext XMPP with encrypted command response bodies.",
+    "Relay captured a cloud-originated GET /ecus/rrc/uiStatus and a device HTTP/1.0 200 OK response with a base64 encrypted JSON body. No cloud-free request or local authentication has been demonstrated yet.",
+    "Existing client credentials successfully decrypt captured PUT bodies. Observed temperatureRoomManual and manualTempOverride/temperature writes with user-selected temperatures.",
+    "Three basic device-side DIGEST password candidates (access key, prefixed access key, app password) did not match the recorded digest. No broad password cracking attempted.",
+    "A bounded offline DIGEST-MD5 server accepting the response but omitting rspauth did not progress to binding; timed out and automatically restored transparent relay. Mutual authentication is a hypothesis, not conclusively established.",
+    "Direct local GET /ecus/rrc/uiStatus on an already cloud-authenticated socket received HTTP 200 and an encrypted body that decrypted with existing credentials. Observed setpoint 14.0 C, room temperature 22.50 C.",
+    "Successful injection waited for startup HTTP traffic, used literal CRLF body line endings from an observed server stanza, and used a 10-character local sender resource. The contributing factors have not been isolated.",
+    "A local server advertising only PLAIN still received an auth stanza selecting DIGEST-MD5; no PLAIN credentials were obtained.",
+    "A second bounded offline server test sent a success stanza containing base64 rspauth= followed by 32 zero digits. The thermostat proceeded to stream restart, resource bind, session establishment and presence.",
+    "That offline server sent GET /ecus/rrc/uiStatus and received HTTP/1.0 200 OK. The server code makes no upstream/cloud connection. Existing client credentials decrypted the result: manual mode, 14.0 C setpoint, 22.50 C measured room temperature.",
+    "The device accepts a formatted invalid DIGEST-MD5 server proof in this tested firmware. Omitting the proof altogether stalls the tested flow. Device password recovery is unnecessary for this local-session experiment.",
+    "No local heating-setting writes were performed. PUTs in the capture came from the user mobile app. Persistent offline operation, time/weather service emulation, reboot behavior and local writes remain untested.",
+    "Implemented client.NewLocalClient with source-IP filtering, serial/domain validation, bounded login, local DIGEST-MD5 compatibility, literal-CRLF GET/PUT transport, listener/session shutdown and reaccept on reconnect.",
+    "Implemented nefit serve with persistent local XMPP and HTTP raw resource/bridge API and high-level status, pressure, temperature, user-mode and hot-water endpoints.",
+    "Go offline server tested against firmware 02.22.00: status, manual setpoint, firmware version and pressure returned correctly. Pressure was 1.5 bar.",
+    "Verified a real offline write: manual setpoint 14.0 -> 14.5, readback 14.5, restoration -> 14.0, readback 14.0. Effective status setpoint confirmed restored to 14.0; measured room temperature was 22.90.",
+    "Observed live device disconnect and successful automatic offline reconnection. Race tests, go vet and golangci-lint passed.",
+    "Captured time/weather service payloads do not decrypt to JSON with the existing app-password key or the empty-password key. These separate services are not implemented.",
+    "Follow-up transparent recording captured app startup reads including gateway UUID/update strategy/firmware, heating control, appliance types/version, temperature step, hot water modes and user schedule programs. User confirmed app reconnects successfully through recorder.",
+    "Bounded service-format test used 16 AES key-material combinations of already-known access key, app password, serial and empty string across five captured time/weather payloads. None yielded recognizable JSON, HTTP, XML or gzip; no conclusion about actual service cipher follows."
+  ],
+  "known_from_repository": {
+    "cloud_endpoint": "wa2-mz36-qrmzh6.bosch.de:5222",
+    "client_transport": "XMPP with STARTTLS; current Go client requires TLS 1.2 or later",
+    "contact_jid": "rrccontact_SERIAL@HOST",
+    "gateway_jid": "rrcgateway_SERIAL@HOST",
+    "contact_auth_password": "Ct7ZR03b_ + accessKey; device-side authentication is not established",
+    "body_cipher": "AES-256-ECB, base64 encoding, zero padding",
+    "key_derivation": "MD5(accessKey + magicBytes) concatenated with MD5(magicBytes + appPassword)",
+    "magic_hex": "58f18d70f667c9c79ef7de435bf0f9b1553bbb6e61816212ab80e5b0d351fbb1",
+    "get_request": "HTTP-like plaintext GET inside XMPP message; response body encrypted"
+  },
+  "external_evidence": [
+    {
+      "url": "https://www.rdi.nl/site/binaries/site-content/collections/documenten/2019/09/25/rapport-digitale-veiligheid-van-iot-apparatuur/Report%2Bon%2BIoT%2BDevice%2BSecurity.pdf",
+      "section": "8.2.2, printed page 52",
+      "finding": "2019 investigators intercepted thermostat-to-cloud XMPP TLS using a self-signed certificate and extracted a DIGEST-MD5 challenge/response. This is historical evidence, not verification of the current device firmware."
+    }
+  ],
+  "next_experiments": [
+    "Compare paired time-service request/response blocks and startup ordering in transparent recordings; derive candidate framing from evidence.",
+    "Verify offline startup and reconnect behavior with time/weather service responses understood.",
+    "Obtain gateway-side DNS capture during reconnect when user is available; then test scoped DNS override.",
+    "Capture firmware update flow only with explicit user coordination; current update-strategy reads do not establish a reliable update block."
+  ],
+  "status": "Typed standalone/embedded offline and both modes implemented. Live offline GET and same-value PUT/readback verified without Bosch sockets. HomeKit development bridge connected offline and served live SSE state. Both restored; prior app coexistence and local writes verified. Service encryption and DNS cold boot remain unresolved.",
+  "successful_reproduction": {
+    "network": "UniFi IoT ingress DNAT: source 192.168.156.96, original destination any TCP/5222, translated IP 10.65.0.27; allow TCP/5222 between device and this machine.",
+    "command": "sudo python3 research/offline-status-probe.py --dummy-proof (stop other port-5222 listener first; reconnect device)",
+    "credentials": "Existing access key and app password decrypt/encrypt API bodies; keep these outside tracked files.",
+    "flow": [
+      "Device opens stream for the original Bosch XMPP domain.",
+      "Server advertises DIGEST-MD5 and challenges with the original domain as realm.",
+      "Device sends its digest response; local server does not need to verify it for this device-owned prototype.",
+      "Server success includes base64 rspauth=00000000000000000000000000000000.",
+      "Device restarts stream; server offers bind and session, and acknowledges their IQs.",
+      "After device presence, server sends an HTTP-like status GET in a message from rrccontact_SERIAL@original-domain/localprobe to rrcgateway_SERIAL@original-domain.",
+      "Device replies with HTTP 200 and base64 AES-256-ECB JSON body. Existing library crypto decrypts it."
+    ],
+    "private_artifacts": "~/.local/state/nefit-go/captures/2026-10-05; private raw recordings are not committed.",
+    "normal_operation": "Go both-mode server behind transparent raw recorder; cloud app path enabled.",
+    "go_command": "nefit serve --device-ip 192.168.156.96 --xmpp-listen 10.65.0.27:5222 --http-listen 127.0.0.1:8088"
+  },
+  "implementation": {
+    "core": [
+      "shared typed namespace-aware XMPP codec and bounded stream framing",
+      "fully typed contact cloud client with verified STARTTLS",
+      "embeddable server and CLI offline/both modes",
+      "shared per-device cloud/local request scheduler",
+      "offline fallback and cloud recovery via device reconnect",
+      "scoped XMPP update filtering",
+      "optional device-scoped UDP/TCP DNS and SRV records",
+      "NixOS standalone module",
+      "HomeKit embedded backend and Nix/env configuration"
+    ],
+    "validation": [
+      "Go race tests, lint and vet",
+      "captured XML semantic/typed round trips and malformed/fragmented input",
+      "2.4 million fuzz executions without failure",
+      "live typed cloud read",
+      "live both-mode reads and same-value PUT/readback; user confirmed app works",
+      "live typed offline reads and same-value PUT/readback without cloud sockets",
+      "live offline HomeKit connection and SSE state",
+      "Nix build and flake checks (Linux)"
+    ],
+    "remaining": [
+      "offline time/weather decoding; known-material AES tests found no recognizable formats",
+      "gateway DNS capture and offline cold boot",
+      "actual firmware update flow; XMPP filtering is not complete egress enforcement",
+      "multi-day device soak testing",
+      "publish/pin companion nefit-go API before standalone HomeKit packaging"
+    ]
+  }
+}

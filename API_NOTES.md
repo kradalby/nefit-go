@@ -213,18 +213,19 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 ## Connection Lifecycle
 
 - The client owns connecting. A request with no live session logs in on its own; `Connect()` does the same ahead of time, which is what lets push notifications arrive before the first request.
-- One login runs at a time. Requests and `Connect()` calls that need a session meanwhile wait for it rather than start another. A caller that gives up does not abort it; `ConnectTimeout` (default 30s) and `Close()` do, barring the [Known limits](#known-limits).
+- One login runs at a time. Requests and `Connect()` calls that need a session meanwhile wait for it rather than start another. A caller that gives up does not abort it; `ConnectTimeout` (default 30s) and `Close()` do.
 - `Done()` is closed when the session ends: the stream fails, `Close()` is called, or a request fails after it may have gone out. To keep pushes flowing, wait on `Done()` and call `Connect()` again, with backoff.
 - `Connect()` returning nil means a session was established; it may already have ended, so watch `Done()` rather than assume it is up.
 - A half-open connection (the peer vanished without closing) is noticed only when a request goes unanswered, or when the kernel gives up retransmitting a keepalive presence, which takes minutes. There is no read deadline; pushes stop silently until then. Poll with a request to notice sooner.
-- go-xmpp reaches the backend through an in-process loopback relay, so its sockets can be closed mid-handshake. On the relay path, this is what bounds a login by `ConnectTimeout` and lets `Close()` return; see [Known limits](#known-limits) for the paths around it.
+- The cloud and device transports own every socket and use the shared typed XML codec. Cloud contact authentication runs only inside verified STARTTLS; device gateway authentication is relayed in `both` mode.
 
-### Known limits
+## Known limits
 
-go-xmpp dials on its own in two cases. Those sockets bypass the relay: they have no timeout and `Close()` cannot abort them, so a login may outlast `ConnectTimeout` and `Close()` may never return.
-
-- **Proxy variables.** With `HTTP_PROXY` (or `http_proxy`) set, go-xmpp sends the relay connection through that proxy unless `NO_PROXY` matches `127.0.0.1`. Whenever `HTTP_PROXY` is set, include `127.0.0.1` in `NO_PROXY`. The backend connection never uses a proxy, so a backend reachable only through one is unsupported.
-- **XMPP redirects.** A `<see-other-host>` stream error after STARTTLS makes go-xmpp dial the named host itself, inside TLS where the relay cannot intercept it. Redirects are unsupported. The Bosch backend is not known to send them; this is unverified.
+- HTTP proxy environment variables and XMPP host redirects are unsupported; they cannot create sockets outside the client's lifecycle.
+- Offline device authentication relies on source IP and gateway identity, not verification of the gateway's unknown DIGEST-MD5 secret.
+- Time/weather service encryption remains unresolved offline. `both` forwards those services.
+- Firmware blocking applies to configured XMPP services and update writes. Downloads outside XMPP and actual update transactions have not been validated.
+- DNS takeover and cold boot without internet require gateway-side DNS evidence and hardware testing. The optional DNS endpoint's UDP/TCP behavior is covered by tests.
 
 ## Production Recommendations
 

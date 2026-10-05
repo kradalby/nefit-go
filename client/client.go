@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,8 +36,10 @@ type Client struct {
 	encryptor *crypto.Encryptor
 	queue     *RequestQueue
 
-	dial func(context.Context) (transport, error)
-	conn atomic.Pointer[conn]
+	dial          func(context.Context) (transport, error)
+	localListener net.Listener
+	localMode     ServerMode
+	conn          atomic.Pointer[conn]
 	// mu serialises starting and publishing a dial against Close.
 	mu      sync.Mutex
 	dialing *dialCall
@@ -135,7 +136,12 @@ func (c *Client) session(ctx context.Context) (*conn, error) {
 }
 
 func (c *Client) runDial(d *dialCall) {
+	mode := "cloud"
+	if c.localListener != nil {
+		mode = string(c.localMode)
+	}
 	c.logger.Info("connecting to Nefit Easy backend",
+		"mode", mode,
 		"host", c.config.Host,
 		"jid", c.config.JID())
 
@@ -170,26 +176,12 @@ func (c *Client) runDial(d *dialCall) {
 }
 
 func (c *Client) dialBackend(ctx context.Context) (transport, error) {
-	// Bosch servers require STARTTLS (plain TCP → TLS upgrade), not direct TLS
-	options := xmpp.Options{
-		User:     c.config.JID(),
-		Password: c.config.AuthPassword(),
-		NoTLS:    true,
-		StartTLS: true,
-		TLSConfig: &tls.Config{
-			ServerName: c.config.Host,
-			MinVersion: tls.VersionTLS12,
-		},
-		InsecureAllowUnencryptedAuth: false,
-	}
-
-	return dialXMPP(ctx, net.JoinHostPort(c.config.Host, strconv.Itoa(c.config.Port)), options)
+	return dialCloud(ctx, c.config, &tls.Config{ServerName: c.config.Host, MinVersion: tls.VersionTLS12})
 }
 
 // Close disconnects from the XMPP server, stops background workers and waits
 // for running push handlers, so a handler must not call it. It is safe to
-// call more than once. It can hang on a connection go-xmpp dialled itself;
-// see "Known limits" in API_NOTES.md.
+// call more than once. Every transport socket is owned and abortable.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.logger.Info("closing Nefit Easy client")
@@ -198,6 +190,9 @@ func (c *Client) Close() error {
 		c.cancel()
 		cn := c.conn.Swap(nil)
 		c.mu.Unlock()
+		if c.localListener != nil {
+			_ = c.localListener.Close()
+		}
 
 		if cn != nil {
 			cn.close()

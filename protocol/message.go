@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
-	"html"
 	"io"
 	"strconv"
 	"strings"
@@ -43,33 +42,19 @@ func BuildPutMessage(from, to, uri string, encryptedData string) string {
 }
 
 func buildXMPPMessage(from, to, body string) string {
-	// Escape XML special characters in body, but preserve \r as &#13;\n for protocol
-	escapedBody := escapeXMLBody(body)
-
-	return fmt.Sprintf(
-		`<message from="%s" to="%s"><body>%s</body></message>`,
-		html.EscapeString(from),
-		html.EscapeString(to),
-		escapedBody,
-	)
-}
-
-func escapeXMLBody(body string) string {
-	placeholder := "\x00CRLF\x00"
-	body = strings.ReplaceAll(body, "\r", placeholder)
-
-	escaped := html.EscapeString(body)
-
-	escaped = strings.ReplaceAll(escaped, placeholder, "&#13;\n")
-
-	return escaped
+	data, err := xml.Marshal(MessageStanza{From: from, To: to, Body: strings.ReplaceAll(body, "\r", "\r\n")})
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // ParseHTTPResponse parses an HTTP-over-XMPP response.
 func ParseHTTPResponse(data string) (*HTTPResponse, error) {
 	// Replace &#13; entities back to \r for HTTP parsing
 	data = strings.ReplaceAll(data, "&#13;", "\r")
-	data = strings.ReplaceAll(data, "\n", "\r\n")
+	data = strings.ReplaceAll(data, "\r\n", "\n")
+	data = strings.ReplaceAll(data, "\r", "\n")
 
 	reader := bufio.NewReader(strings.NewReader(data))
 
@@ -134,6 +119,20 @@ type MessageStanza struct {
 	To      string   `xml:"to,attr"`
 	Type    string   `xml:"type,attr,omitempty"`
 	Body    string   `xml:"body"`
+}
+
+// MarshalXML preserves the namespace learned from the incoming stream.
+func (m MessageStanza) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	start.Name = m.XMLName
+	if start.Name.Local == "" {
+		start.Name.Local = "message"
+	}
+	return e.EncodeElement(struct {
+		From string `xml:"from,attr"`
+		To   string `xml:"to,attr"`
+		Type string `xml:"type,attr,omitempty"`
+		Body string `xml:"body"`
+	}{m.From, m.To, m.Type, m.Body}, start)
 }
 
 // ExtractBody extracts and decodes the body content from an XMPP message XML string.
