@@ -49,7 +49,7 @@
           root = ./.;
           pname = "nefit-go";
           version = "0.1.0";
-          vendorHash = "sha256-M4KFewgVbQCm8Zr+yU5Y08V/kkmcaq/HWASPUtW/Zww=";
+          vendorHash = "sha256-I09Qt/FaGBpNx6SN5zHBglhmQdaPM8wN+EjrNB92U/w=";
           # go_latest, not bare `pkgs.go`: the latter still resolves to the
           # previous stable (1.26) in nixpkgs. flake-checks feeds this to
           # `buildGoModule.override { go = goPkg; }`, so this is the single
@@ -96,5 +96,8 @@
           GOROOT = "${pkgs.go_latest}/share/go";
         };
       }
-    );
+    )
+    // {
+      nixosModules.default = import ./nix/module.nix;
+    };
 }

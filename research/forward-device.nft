@@ -1,0 +1,14 @@
+# Temporary, device-scoped forwarding support. Existing FORWARD policy accepts
+# enp5s0-to-enp5s0 traffic. SNAT prevents UniFi's source policy routing from
+# sending forwarded traffic back here and ensures replies traverse this host.
+# Remove with: sudo nft delete table ip nefit_research
+table ip nefit_research {
+    chain postrouting {
+        type nat hook postrouting priority 99; policy accept;
+        iifname "enp5s0" oifname "enp5s0" ip saddr 192.168.156.96 counter snat to 10.65.0.27
+    }
+    chain output {
+        type filter hook output priority 0; policy accept;
+        ip daddr 192.168.156.96 icmp type redirect counter drop
+    }
+}

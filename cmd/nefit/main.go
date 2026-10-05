@@ -44,6 +44,7 @@ Examples:
   nefit pressure                    # Get system pressure`,
 		FlagSet: rootFlagSet,
 		Subcommands: []*ffcli.Command{
+			serveCmd,
 			statusCmd,
 			pressureCmd,
 			getCmd,
