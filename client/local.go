@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	legacy "github.com/xmppo/go-xmpp"
@@ -172,27 +174,67 @@ func (c *Client) UpstreamConnected() bool {
 }
 
 type localTransport struct {
-	socket  net.Conn
-	reader  *wire.Reader
-	config  Config
-	options LocalOptions
-	writeMu sync.Mutex
+	socket    net.Conn
+	reader    *wire.Reader
+	config    Config
+	options   LocalOptions
+	writeOnce sync.Once
+	writer    chan struct{}
 	bridgeState
 }
 
 func (t *localTransport) write(v any) (int, error) {
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
+	return t.writeContext(context.Background(), v, nil)
+}
+
+// Acquire the writer and claim the request only immediately before socket I/O.
+// Presence/service traffic may hold the writer while a queued API call expires.
+func (t *localTransport) writeContext(ctx context.Context, v any, state *atomic.Int32) (int, error) {
+	data, err := encodeTyped(v)
+	if err != nil {
+		return 0, &unsentError{err}
+	}
+	t.writeOnce.Do(func() { t.writer = make(chan struct{}, 1) })
+	select {
+	case t.writer <- struct{}{}:
+	case <-ctx.Done():
+		return 0, &unsentError{ctx.Err()}
+	}
+	defer func() { <-t.writer }()
+	if err := ctx.Err(); err != nil {
+		return 0, &unsentError{err}
+	}
+	if state != nil && !state.CompareAndSwap(queued, started) {
+		return 0, &unsentError{context.Canceled}
+	}
 	timeout := t.options.RequestTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 	_ = t.socket.SetWriteDeadline(time.Now().Add(timeout))
 	defer func() { _ = t.socket.SetWriteDeadline(time.Time{}) }()
-	return writeTyped(t.socket, v)
+	stop := context.AfterFunc(ctx, func() { _ = t.socket.Close() })
+	defer stop()
+	return writeBytes(t.socket, data)
 }
 
 func writeTyped(w io.Writer, v any) (int, error) {
+	data, err := encodeTyped(v)
+	if err != nil {
+		return 0, err
+	}
+	return writeBytes(w, data)
+}
+
+func writeBytes(w io.Writer, data []byte) (int, error) {
+	n, err := w.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+func encodeTyped(v any) ([]byte, error) {
 	var buffer bytes.Buffer
 	var err error
 	var element *wire.Element
@@ -205,13 +247,13 @@ func writeTyped(w io.Writer, v any) (int, error) {
 	} else {
 		raw, marshalErr := xml.Marshal(v)
 		if marshalErr != nil {
-			return 0, marshalErr
+			return nil, marshalErr
 		}
 		element = new(wire.Element)
 		err = xml.Unmarshal(raw, element)
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if element != nil {
 		enc := xml.NewEncoder(&buffer)
@@ -221,17 +263,9 @@ func writeTyped(w io.Writer, v any) (int, error) {
 		}
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	data, err := wire.DeviceXML(buffer.Bytes())
-	if err != nil {
-		return 0, err
-	}
-	n, err := w.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return n, err
+	return wire.DeviceXML(buffer.Bytes())
 }
 
 func (t *localTransport) Close() error {
@@ -249,14 +283,21 @@ func (t *localTransport) Close() error {
 }
 
 func (t *localTransport) Send(chat legacy.Chat) (int, error) {
+	return t.SendContext(context.Background(), chat)
+}
+
+func (t *localTransport) SendContext(ctx context.Context, chat legacy.Chat) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, &unsentError{err}
+	}
 	message := wire.Message{From: t.config.JID() + "/" + localResource, To: chat.Remote, Type: "chat", Body: wire.Body{Text: chat.Text}}
 	if t.blocked(message) {
-		return 0, fmt.Errorf("firmware update write blocked by policy")
+		return 0, &unsentError{errors.New("firmware update write blocked by policy")}
 	}
 	if t.inputs == nil {
-		return t.write(message)
+		return t.writeContext(ctx, message, nil)
 	}
-	return t.submit(message)
+	return t.submit(ctx, message)
 }
 
 func (t *localTransport) SendPresence(_ legacy.Presence) (int, error) {
@@ -385,6 +426,9 @@ func (t *localTransport) Recv() (any, error) {
 		if frame.Element == nil {
 			return nil, fmt.Errorf("unexpected stream restart")
 		}
+		if t.blockedFrame(frame) {
+			continue
+		}
 		e := frame.Element
 		switch e.Name {
 		case xml.Name{Space: wire.ClientNS, Local: "message"}:
@@ -429,7 +473,14 @@ func (t *localTransport) service(m wire.Message) error {
 		return err
 	}
 	if response != nil {
-		_, err = t.write(response)
+		frame, err := messageFrame(*response)
+		if err != nil {
+			return err
+		}
+		if !t.blockedFrame(frame) {
+			_, err = t.write(frame)
+		}
+		return err
 	}
 	return err
 }

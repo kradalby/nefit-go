@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -153,7 +154,7 @@ func (s *DNS) serveTCP() {
 				if _, err := io.ReadFull(conn, raw); err != nil {
 					return
 				}
-				reply, err := s.answer(raw)
+				reply, err := s.answerFor(raw, "tcp")
 				if err != nil {
 					return
 				}
@@ -167,7 +168,9 @@ func (s *DNS) serveTCP() {
 	}
 }
 
-func (s *DNS) answer(raw []byte) ([]byte, error) {
+func (s *DNS) answer(raw []byte) ([]byte, error) { return s.answerFor(raw, "udp") }
+
+func (s *DNS) answerFor(raw []byte, network string) ([]byte, error) {
 	var query dnsmessage.Message
 	if err := query.Unpack(raw); err != nil {
 		return nil, err
@@ -182,22 +185,11 @@ func (s *DNS) answer(raw []byte) ([]byte, error) {
 	srvName := "_xmpp-client._tcp." + s.cfg.Hostname
 	if q.Class != dnsmessage.ClassINET || name != s.cfg.Hostname && name != srvName {
 		if s.cfg.ForwardAddress != "" {
-			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-			defer cancel()
-			var d net.Dialer
-			conn, err := d.DialContext(ctx, "udp", s.cfg.ForwardAddress)
+			reply, err := s.forward(raw, network)
 			if err == nil {
-				defer conn.Close() //nolint:errcheck
-				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-				if _, err = conn.Write(raw); err == nil {
-					buf := make([]byte, 4096)
-					n, err := conn.Read(buf)
-					if err == nil {
-						var result dnsmessage.Message
-						if err = result.Unpack(buf[:n]); err == nil && result.Response && result.ID == query.ID && len(result.Questions) == 1 && result.Questions[0] == q {
-							return buf[:n], nil
-						}
-					}
+				var result dnsmessage.Message
+				if err = result.Unpack(reply); err == nil && result.Response && result.ID == query.ID && len(result.Questions) == 1 && result.Questions[0] == q {
+					return reply, nil
 				}
 			}
 			response.RCode = dnsmessage.RCodeServerFailure
@@ -218,4 +210,38 @@ func (s *DNS) answer(raw []byte) ([]byte, error) {
 		response.Answers = []dnsmessage.Resource{{Header: header, Body: &dnsmessage.SRVResource{Port: s.cfg.XMPPPort, Target: target}}}
 	}
 	return response.Pack()
+}
+
+func (s *DNS) forward(raw []byte, network string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, network, s.cfg.ForwardAddress)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close() //nolint:errcheck
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if network == "tcp" {
+		var length [2]byte
+		binary.BigEndian.PutUint16(length[:], uint16(len(raw)))
+		packet := append(length[:], raw...)
+		if _, err = io.Copy(conn, bytes.NewReader(packet)); err != nil {
+			return nil, err
+		}
+		if _, err = io.ReadFull(conn, length[:]); err != nil {
+			return nil, err
+		}
+		reply := make([]byte, int(binary.BigEndian.Uint16(length[:])))
+		_, err = io.ReadFull(conn, reply)
+		return reply, err
+	}
+	if _, err = conn.Write(raw); err != nil {
+		return nil, err
+	}
+	reply := make([]byte, 4096)
+	n, err := conn.Read(reply)
+	return reply[:n], err
 }

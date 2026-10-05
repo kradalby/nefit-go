@@ -67,6 +67,11 @@
           gotest = fc.goTest common;
           golangci-lint = fc.goLint common;
           formatting = fc.goFormat common;
+          research = pkgs.runCommand "nefit-corpus-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            export PYTHONDONTWRITEBYTECODE=1
+            python3 -m unittest discover -s ${./research} -p 'test_*.py'
+            touch "$out"
+          '';
         };
 
         devShells.default = pkgs.mkShell {
@@ -79,6 +84,7 @@
             delve
             prek
             nixfmt
+            python3
           ];
 
           shellHook = ''

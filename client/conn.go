@@ -102,6 +102,14 @@ func (cn *conn) begin(p *pending) {
 	cn.inflight = p
 }
 
+func (cn *conn) abandon(p *pending) {
+	cn.mu.Lock()
+	defer cn.mu.Unlock()
+	if cn.inflight == p {
+		cn.inflight = nil
+	}
+}
+
 // match claims the in-flight request r answers, if any.
 func (cn *conn) match(r reply) *pending {
 	cn.mu.Lock()

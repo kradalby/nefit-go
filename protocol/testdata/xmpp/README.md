@@ -7,7 +7,7 @@ Private originals are retained outside the repository at `~/.local/state/nefit-g
 Transformations:
 
 - Gateway/contact serials, UUIDs, service resource timestamps and stream IDs are synthetic.
-- SASL nonces and digest proofs are rewritten inside decoded base64. These proofs are intentionally invalid and cannot validate a real DIGEST-MD5 exchange.
+- PLAIN authorization identities, login names and passwords are replaced with synthetic values in initial and continuation payloads. DIGEST identities, realms, nonces, digest URIs and proofs are rewritten inside decoded base64, including whitespace and CDATA representations. These proofs are intentionally invalid and cannot validate a real DIGEST-MD5 exchange.
 - Encrypted body blobs are replaced with base64-encoded zero bytes of the same decoded length. HTTP headers and ciphertext lengths remain intact. These are opaque XML/HTTP fixtures, not AES or decrypted JSON fixtures.
 - Standalone stanzas receive the namespace declarations inherited from their original stream. Quote style, HTTP line endings and the remaining captured XML structure are retained.
 - `.open` files are deliberately incomplete XML documents: XMPP streams remain open across stanzas and restart after authentication.
@@ -27,4 +27,4 @@ To regenerate from private originals:
     python3 research/build-xmpp-corpus.py \
       "$HOME/.local/state/nefit-go/captures/2026-10-05" protocol/testdata/xmpp
 
-The generator fails on invalid XML or invalid SASL base64 rather than silently including unsanitized data. Review fixtures before publishing; additional protocol fields may require additional redaction rules. Extraction is limited to the stanza types listed above and deliberately excludes incomplete stanzas.
+The generator fails on invalid XML, invalid SASL base64 or unsupported SASL mechanisms/payloads rather than silently including unsanitized data. Review fixtures before publishing; additional protocol fields may require additional redaction rules. `python3 -m unittest discover -s research -p 'test_*.py'` checks credential redaction and preservation of existing output after failed validation; CI runs the same tests. Extraction is limited to the stanza types listed above and deliberately excludes incomplete stanzas.

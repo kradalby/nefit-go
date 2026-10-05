@@ -31,8 +31,11 @@ func localTestClient(t *testing.T, timeout time.Duration) *Client {
 }
 
 type deviceFixture struct {
-	socket net.Conn
-	reader *bufio.Reader
+	socket      net.Conn
+	reader      *bufio.Reader
+	afterWrite  func(string)
+	beforeWrite func(string)
+	checkRead   func(string)
 }
 
 func (d *deviceFixture) readThrough(t *testing.T, end string) string {
@@ -45,17 +48,30 @@ func (d *deviceFixture) readThrough(t *testing.T, end string) string {
 		}
 		text.WriteString(part)
 	}
+	if d.checkRead != nil {
+		d.checkRead(text.String())
+	}
 	return text.String()
 }
 
 func (d *deviceFixture) write(t *testing.T, text string) {
 	t.Helper()
+	if d.beforeWrite != nil {
+		d.beforeWrite(text)
+	}
 	if _, err := io.WriteString(d.socket, text); err != nil {
 		t.Fatal(err)
+	}
+	if d.afterWrite != nil {
+		d.afterWrite(text)
 	}
 }
 
 func connectFixture(t *testing.T, c *Client) *deviceFixture {
+	return connectHandshakeFixture(t, c, nil)
+}
+
+func connectHandshakeFixture(t *testing.T, c *Client, hook func(*deviceFixture)) *deviceFixture {
 	t.Helper()
 	connected := make(chan error, 1)
 	go func() { connected <- c.Connect(t.Context()) }()
@@ -68,6 +84,9 @@ func connectFixture(t *testing.T, c *Client) *deviceFixture {
 		t.Fatal(err)
 	}
 	d := &deviceFixture{socket: s, reader: bufio.NewReader(s)}
+	if hook != nil {
+		hook(d)
+	}
 	header := fmt.Sprintf(`<stream:stream from="rrcgateway_%s" to="%s" xmlns="jabber:client" xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`, c.config.SerialNumber, c.config.Host)
 	d.write(t, header)
 	d.readThrough(t, "</stream:features>")
@@ -84,6 +103,14 @@ func connectFixture(t *testing.T, c *Client) *deviceFixture {
 	d.readThrough(t, "</iq>")
 	d.write(t, `<iq type="set" id="sess_1"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>`)
 	ack := d.readThrough(t, "/>")
+	if hook != nil {
+		for !strings.Contains(ack, `id="sess_1"`) {
+			ack = d.readThrough(t, "/>")
+		}
+		if index := strings.Index(ack, `<iq type="result" id="sess_1"`); index >= 0 {
+			ack = ack[index:]
+		}
+	}
 	// Firmware requires the captured acknowledgement layout, including attribute
 	// order. A conforming XML parser alone cannot expose this compatibility bug.
 	if !strings.HasPrefix(ack, `<iq type="result" id="sess_1"`) {

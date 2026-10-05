@@ -222,6 +222,12 @@ func (t *cloudTransport) Recv() (any, error) {
 				if _, err := t.write(wire.IQ{Type: "result", ID: e.Get("id"), From: t.jid, To: e.Get("from")}); err != nil {
 					return nil, err
 				}
+			} else if e.Get("type") == "get" || e.Get("type") == "set" {
+				stanzaError := wire.E(wire.ClientNS, "error", wire.E("urn:ietf:params:xml:ns:xmpp-stanzas", "service-unavailable"))
+				stanzaError.Set("type", "cancel")
+				if _, err := t.write(wire.IQ{Type: "error", ID: e.Get("id"), From: t.jid, To: e.Get("from"), Extensions: []wire.Element{stanzaError}}); err != nil {
+					return nil, err
+				}
 			}
 		case xml.Name{Space: wire.StreamNS, Local: "error"}:
 			return nil, fmt.Errorf("bosch stream error")

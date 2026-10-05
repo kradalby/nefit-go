@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"time"
 
@@ -40,6 +41,11 @@ func NewHandler(c *client.Client, timeout time.Duration) http.Handler {
 		_ = json.NewEncoder(w).Encode(result)
 	}
 	decode := func(w http.ResponseWriter, r *http.Request, result any) bool {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+			return false
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		decoder := json.NewDecoder(r.Body)
 		if err := decoder.Decode(result); err != nil {
@@ -65,7 +71,7 @@ func NewHandler(c *client.Client, timeout time.Duration) http.Handler {
 			respond(w, data, err)
 			return
 		}
-		var data any
+		var data json.RawMessage
 		if !decode(w, r, &data) {
 			return
 		}
@@ -143,5 +149,5 @@ func NewHandler(c *client.Client, timeout time.Duration) http.Handler {
 			respond(w, map[string]bool{"ok": true}, entry.put(ctx, body.Value))
 		})
 	}
-	return mux
+	return http.NewCrossOriginProtection().Handler(mux)
 }

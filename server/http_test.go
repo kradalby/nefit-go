@@ -36,7 +36,9 @@ func TestHTTPRejectsInvalidWritesWithoutDevice(t *testing.T) {
 	} {
 		t.Run(test.method+test.path+test.body, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			handler.ServeHTTP(recorder, httptest.NewRequest(test.method, test.path, strings.NewReader(test.body)))
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(recorder, request)
 			if recorder.Code != test.code {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, test.code, recorder.Body.String())
 			}
