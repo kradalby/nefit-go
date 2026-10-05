@@ -1,0 +1,4 @@
+<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/3zsjad7lhy" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>GET /dhwCircuits/dhwA/thermaldesinfect/state HTTP/1.1
+User-Agent: NefitEasy
+
+</body></message>

@@ -1,0 +1,1 @@
+<iq xmlns="jabber:client" type='set' id='bind_1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><resource>RRC-RestApi</resource></bind></iq>
