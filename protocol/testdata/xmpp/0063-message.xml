@@ -1,0 +1,6 @@
+<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/9sais7269f" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>PUT /heatingCircuits/hc1/temperatureRoomManual HTTP/1.1
+Content-Type: application/json
+Content-Length: 24
+User-Agent: NefitEasy
+
+EJfKRqd8qcujHnenkTqz6Q==</body></message>

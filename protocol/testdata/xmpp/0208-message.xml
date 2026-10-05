@@ -1,0 +1,4 @@
+<message xmlns="jabber:client" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de" type="chat" id="00000000-0000-4000-8000-000000000000" xml:lang="en" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/2rxibbpvez"><body>GET /ecus/rrc/uiStatus HTTP/1.1
+User-Agent: NefitEasy
+
+</body><origin-id xmlns="urn:xmpp:sid:0" id="00000000-0000-4000-8000-000000000000"></origin-id></message>

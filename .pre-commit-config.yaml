@@ -17,12 +17,17 @@ repos:
       - id: check-symlinks
       - id: check-toml
       - id: check-xml
+        exclude: ^protocol/testdata/xmpp/.*\.open$
       - id: check-yaml
       - id: detect-private-key
       - id: end-of-file-fixer
+        # Captured XML byte spelling is verified by the fixture manifest.
+        exclude: ^protocol/testdata/xmpp/.*\.(xml|open)$
       - id: fix-byte-order-marker
       - id: mixed-line-ending
+        exclude: ^protocol/testdata/xmpp/.*\.(xml|open)$
       - id: trailing-whitespace
+        exclude: ^protocol/testdata/xmpp/.*\.(xml|open)$
 
   # Local hooks for project-specific tooling
   - repo: local

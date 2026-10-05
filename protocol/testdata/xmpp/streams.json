@@ -1,0 +1,27 @@
+[
+  {
+    "file": "stream-00.open",
+    "recording": "1791197202637288110-cloud.bin",
+    "offset": 38
+  },
+  {
+    "file": "stream-01.open",
+    "recording": "1791197202637288110-device.bin",
+    "offset": 21
+  },
+  {
+    "file": "stream-02.open",
+    "recording": "both/1791206564917379509/server-to-device.xmpp",
+    "offset": 0
+  },
+  {
+    "file": "stream-03.open",
+    "recording": "both/1791208117969691740/server-to-device.xmpp",
+    "offset": 0
+  },
+  {
+    "file": "stream-04.open",
+    "recording": "offline/1791203988979709521/server-to-device.xmpp",
+    "offset": 0
+  }
+]

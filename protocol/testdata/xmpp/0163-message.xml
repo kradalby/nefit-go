@@ -1,0 +1,4 @@
+<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/47vjn1lfzc" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>GET /ecus/rrc/weatherDependent/forcedSwitchedOff HTTP/1.1
+User-Agent: NefitEasy
+
+</body></message>
