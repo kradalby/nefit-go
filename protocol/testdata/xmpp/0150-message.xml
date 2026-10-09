@@ -1,4 +1,4 @@
-<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/47vjn1lfzc" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>GET /gateway/update/strategy HTTP/1.1
+<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/47vjn1lfzc" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>GET /dhwCircuits/dhwA/hotWaterSystem HTTP/1.1
 User-Agent: NefitEasy
 
 </body></message>

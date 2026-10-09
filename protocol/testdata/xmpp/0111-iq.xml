@@ -1,1 +1,1 @@
-<iq xmlns="jabber:client" type="result" id="bind_1" to="wa2-mz36-qrmzh6.bosch.de/46s31yty6h"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><jid xmlns="urn:ietf:params:xml:ns:xmpp-bind">rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de/RRC-RestApi</jid></bind></iq>
+<iq xmlns="jabber:client" type="result" id="bind_1" to="wa2-mz36-qrmzh6.bosch.de/8ad44k5h0q"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><jid xmlns="urn:ietf:params:xml:ns:xmpp-bind">rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de/RRC-RestApi</jid></bind></iq>

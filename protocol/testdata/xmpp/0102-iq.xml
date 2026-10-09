@@ -1,1 +1,1 @@
-<iq xmlns="jabber:client" type="get" id="860-387809549" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de/RRC-RestApi" from="wa2-mz36-qrmzh6.bosch.de"><query xmlns="jabber:iq:version"></query></iq>
+<iq xmlns="jabber:client" type="get" id="40-387818173" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de/RRC-RestApi" from="wa2-mz36-qrmzh6.bosch.de"><query xmlns="jabber:iq:version"></query></iq>

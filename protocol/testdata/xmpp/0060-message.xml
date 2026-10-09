@@ -1,4 +1,5 @@
-<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/9sais7269f" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>GET /ecus/rrc/temperaturestep HTTP/1.1
-User-Agent: NefitEasy
+<message to='rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/9sais7269f' xmlns='jabber:client' type='chat' xml:lang='en'><body>HTTP/1.0 204 No Content
+Content-Type: application/json
+connection: close
 
 </body></message>
