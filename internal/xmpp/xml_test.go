@@ -1138,3 +1138,27 @@ func TestQNameReencodingBound(t *testing.T) {
 		t.Fatal("typed QName namespace amplification escaped output bound")
 	}
 }
+
+func TestUnusedLongNamespacePrefixAllocations(t *testing.T) {
+	header := `<stream:stream xmlns="jabber:client" xmlns:stream="` + StreamNS + `" xmlns:` + strings.Repeat("p", 63000) + `="urn:unused">`
+	r := NewReader(strings.NewReader(header + `<message>` + strings.Repeat(`<x/>`, MaxStanzaNodes-1) + `</message>`))
+	if _, err := r.Next(); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, device := range []bool{false, true} {
+		result := testing.Benchmark(func(b *testing.B) {
+			for b.Loop() {
+				if _, err := Marshal(frame, device); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		if result.AllocedBytesPerOp() > 1<<20 {
+			t.Fatalf("unused namespace amplified allocations: %d bytes/op", result.AllocedBytesPerOp())
+		}
+	}
+}

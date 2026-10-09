@@ -178,9 +178,9 @@ func (e Element) encode(enc *xml.Encoder, raw io.Writer, parent string, parentNa
 	// prefix is conservative: extension schemas are not known here.
 	text := e.Text()
 	for _, prefix := range prefixes {
-		used := strings.Contains(text, prefix+":")
+		used := len(text) > len(prefix) && strings.Contains(text, prefix+":")
 		for _, a := range e.Attr {
-			used = used || strings.Contains(a.Value, prefix+":")
+			used = used || len(a.Value) > len(prefix) && strings.Contains(a.Value, prefix+":")
 		}
 		if used {
 			declarations[prefix] = bindings[prefix]
