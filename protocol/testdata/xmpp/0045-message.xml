@@ -1,6 +1,4 @@
-<message to='rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/4y64o779tt' xmlns='jabber:client' type='chat' xml:lang='en'><body>HTTP/1.0 200 OK
-Content-Length:  216
-Content-Type: application/json
-connection: close
+<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/9sais7269f" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de"><body>GET /gateway/update/strategy HTTP/1.1
+User-Agent: NefitEasy
 
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==</body></message>
+</body></message>

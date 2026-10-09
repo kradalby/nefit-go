@@ -1,6 +1,5 @@
-<message to='rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/4y64o779tt' xmlns='jabber:client' type='chat' xml:lang='en'><body>HTTP/1.0 200 OK
-Content-Length:  128
+<message to='rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/4y64o779tt' xmlns='jabber:client' type='chat' xml:lang='en'><body>HTTP/1.0 204 No Content
 Content-Type: application/json
 connection: close
 
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</body></message>
+</body></message>

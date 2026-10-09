@@ -1,4 +1,6 @@
-<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/775f7f5c72" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de" type="chat"><body>GET /gateway/versionFirmware HTTP/1.1
+<message xmlns="jabber:client" from="rrccontact_123456789@wa2-mz36-qrmzh6.bosch.de/localprobe" to="rrcgateway_123456789@wa2-mz36-qrmzh6.bosch.de" type="chat"><body>PUT /heatingCircuits/hc1/temperatureRoomManual HTTP/1.1
+Content-Type: application/json
+Content-Length: 24
 User-Agent: NefitEasy
 
-</body></message>
+AAAAAAAAAAAAAAAAAAAAAA==</body></message>
