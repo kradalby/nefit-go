@@ -29,7 +29,7 @@ The command will run until you press Ctrl+C.
 
 Example:
   nefit subscribe
-  nefit subscribe --pretty`,
+  nefit --pretty subscribe`,
 	Exec: func(ctx context.Context, args []string) error {
 		c, err := createClient()
 		if err != nil {

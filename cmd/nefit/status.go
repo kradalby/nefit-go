@@ -28,7 +28,7 @@ var statusCmd = &ffcli.Command{
 
 Example:
   nefit status
-  nefit status --pretty
+  nefit --pretty status
   nefit status --skip-outdoor`,
 	FlagSet: statusFlagSet,
 	Exec: func(ctx context.Context, args []string) error {

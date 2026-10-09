@@ -31,7 +31,7 @@ jobs:
         uses: Mic92/hestia@dfed9ced335d28978ba74e513939a10db1f71025 # v3.1.0
 
       - name: build
-        run: nix build -L .#checks.x86_64-linux.build
+        run: nix build -L .#checks.x86_64-linux.build .#checks.x86_64-linux.nixos-module
 
   gotest:
     runs-on: ubuntu-latest
@@ -46,7 +46,22 @@ jobs:
         uses: Mic92/hestia@dfed9ced335d28978ba74e513939a10db1f71025 # v3.1.0
 
       - name: gotest
-        run: nix build -L .#checks.x86_64-linux.gotest
+        run: nix build -L .#checks.x86_64-linux.gotest .#checks.x86_64-linux.research
+
+  gotest-race:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Nix
+        uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1.0.0
+
+      - name: Setup Nix cache (hestia)
+        uses: Mic92/hestia@dfed9ced335d28978ba74e513939a10db1f71025 # v3.1.0
+
+      - name: gotest-race
+        run: nix build -L .#checks.x86_64-linux.gotest-race
 
   golangci-lint:
     runs-on: ubuntu-latest

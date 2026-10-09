@@ -1,5 +1,7 @@
 # Changelog - Production Fixes
 
+> Historical notes. Current retry and lifecycle behaviour is described in [API_NOTES.md](API_NOTES.md).
+
 ## Changes Made - 2024
 
 ### 1. Enhanced Debug Logging for PUT Requests

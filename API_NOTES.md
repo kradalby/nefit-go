@@ -17,7 +17,7 @@ The API only accepts the following values for the user mode:
 
 **❌ INVALID:** `"off"` is NOT a valid mode value
 
-Attempting to set the mode to `"off"` will result in:
+`SetUserMode` rejects any other value before sending. A raw PUT of `"off"` reaches the device and gets:
 ```
 HTTP 400 Bad Request
 ```
@@ -45,7 +45,7 @@ Since `"off"` is not a valid mode, use one of these approaches:
 
 ### Exponential Backoff
 
-The library now uses exponential backoff for retries instead of immediate retries:
+PUT retries use exponential backoff. GET retries start immediately, and so does a PUT whose session ended before it was written: waiting for the next login already paces it. Both retry only failures known to occur before sending:
 
 - Initial retry timeout: 2 seconds (configurable via `RetryTimeout`)
 - Backoff multiplier: 2x
@@ -60,10 +60,10 @@ Example retry timeline:
 
 ### When Retries Happen
 
-Retries only occur for attempts that timed out (`context.DeadlineExceeded`) before reaching the backend: queued behind other requests, or waiting for a login.
+Retries occur when an attempt times out (`context.DeadlineExceeded`) before reaching the backend, or loses its session while still unsent. Examples include waiting in the queue, waiting for login, and losing a connection before obtaining its writer. Sent requests are not replayed.
 
 Retries do NOT occur for:
-- A request that went out and got no reply in time. Replies carry no request id, so its late reply could answer the next request; the session is retired instead, and a retry would cost a fresh login and, with the gateway silent, time out the same way. The error still matches `context.DeadlineExceeded`.
+- A request that went out and got no reply in time. Replies carry no request id, so its late reply could answer a retry, and a write must not be replayed. On the cloud transport the session is retired at once; the device server retires it only if the reply never arrives within `RequestTimeout`. The error still matches `context.DeadlineExceeded`.
 - HTTP 400 Bad Request (indicates invalid data)
 - HTTP 404 Not Found (indicates invalid endpoint)
 - HTTP 500+ Server Errors (typically indicates API or boiler issues)
@@ -121,8 +121,8 @@ For failed requests, ERROR level logs include:
 
 ```
 DBG PUT request data prepared uri=/heatingCircuits/hc1/usermode json_data={"value":"manual"} json_length=18
-DBG PUT request encrypted uri=/heatingCircuits/hc1/usermode encrypted_length=24
-DBG sending PUT request uri=/heatingCircuits/hc1/usermode from=rrccontact_SERIAL@wa2-mz36-qrmzh6.bosch.de to=rrcgateway_SERIAL@wa2-mz36-qrmzh6.bosch.de encrypted_payload_length=24 decrypted_json={"value":"manual"}
+DBG PUT request encrypted uri=/heatingCircuits/hc1/usermode encrypted_length=44
+DBG sending PUT request uri=/heatingCircuits/hc1/usermode from=rrccontact_SERIAL@wa2-mz36-qrmzh6.bosch.de to=rrcgateway_SERIAL@wa2-mz36-qrmzh6.bosch.de encrypted_payload_length=44 decrypted_json={"value":"manual"}
 DBG PUT request successful uri=/heatingCircuits/hc1/usermode status_code=204
 ```
 
@@ -161,7 +161,7 @@ Setting temperature requires THREE API calls:
 
 The `SetTemperature()` method handles all three calls automatically.
 
-**Valid range:** Typically 5.0°C to 30.0°C (depends on your boiler configuration)
+**Valid range:** `SetTemperature` accepts `client.MinTemperature` (5.0 °C) to `client.MaxTemperature` (30.0 °C) and returns `client.ErrInvalidValue` for anything else, without sending. Your boiler configuration may narrow the range further.
 
 ## API Rate Limiting
 
@@ -171,20 +171,28 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 
 ## Error Handling Best Practices
 
-1. **Always check for specific error types:**
+1. **Check for specific errors:**
    ```go
-   if err != nil {
-       if strings.Contains(err.Error(), "HTTP error 400") {
-           // Invalid request - fix the data
-       } else if strings.Contains(err.Error(), "context deadline exceeded") {
-           // Timeout - maybe retry manually
-       }
+   var httpErr *client.HTTPError
+   switch {
+   case errors.Is(err, protocol.ErrInvalidURI):
+       // Not origin-form: no leading '/', or whitespace, control bytes, non-ASCII or '#'; nothing was sent
+   case errors.Is(err, client.ErrInvalidValue):
+       // Temperature or user mode out of range; nothing was sent
+   case errors.Is(err, client.ErrUpdateBlocked):
+       // Refused by UpdatesBlock before sending
+   case errors.Is(err, context.DeadlineExceeded):
+       // Timed out; the library already retried what never reached the device
+   case errors.Is(err, client.ErrClosed), errors.Is(err, client.ErrListenerFailed):
+       // The client (or server.Server) is done; create a new one
+   case errors.As(err, &httpErr) && httpErr.StatusCode == 400:
+       // The device rejected the request - fix the data
    }
    ```
 
 2. **Enable debug logging during development** to see exactly what's being sent
 
-3. **Use appropriate timeouts** - the default 2 seconds works for most requests
+3. **Use appropriate timeouts** - the default 2 second `RetryTimeout` works for most requests
 
 4. **Don't retry 400 errors** - they indicate invalid input
 
@@ -213,18 +221,14 @@ The Nefit Easy backend only allows **one concurrent request at a time**. The lib
 ## Connection Lifecycle
 
 - The client owns connecting. A request with no live session logs in on its own; `Connect()` does the same ahead of time, which is what lets push notifications arrive before the first request.
-- One login runs at a time. Requests and `Connect()` calls that need a session meanwhile wait for it rather than start another. A caller that gives up does not abort it; `ConnectTimeout` (default 30s) and `Close()` do, barring the [Known limits](#known-limits).
-- `Done()` is closed when the session ends: the stream fails, `Close()` is called, or a request fails after it may have gone out. To keep pushes flowing, wait on `Done()` and call `Connect()` again, with backoff.
+- One login runs at a time. Requests and `Connect()` calls that need a session meanwhile wait for it rather than start another. A caller that gives up does not abort it; `ConnectTimeout` (default 30s) and `Close()` do.
+- `Done()` is closed when the session ends: the stream fails, `Close()` is called, or, on the cloud transport, a request is abandoned after it may have gone out. To keep cloud pushes flowing, wait on `Done()` and call `Connect()` again, with backoff; the device server admits new logins by itself.
+- At most 64 push handlers run at once. While all are busy, further pushes are dropped with a warning, so a slow handler cannot stall replies.
+- Requests that expire before writing, including while waiting behind cloud requests in `both`, preserve the session and are retried while time remains. Update-policy rejections also preserve it. Writes that may have reached the backend are never replayed.
+- Replies carry no request id. On the cloud transport, a request abandoned after sending retires the session, since its late reply could pass for the next one's. On the local device server the bridge tracks the outstanding request itself: an abandoned request keeps the device until its reply arrives (and is discarded) or `RequestTimeout` passes, and only an unanswered request retires the session.
 - `Connect()` returning nil means a session was established; it may already have ended, so watch `Done()` rather than assume it is up.
-- A half-open connection (the peer vanished without closing) is noticed only when a request goes unanswered, or when the kernel gives up retransmitting a keepalive presence, which takes minutes. There is no read deadline; pushes stop silently until then. Poll with a request to notice sooner.
-- go-xmpp reaches the backend through an in-process loopback relay, so its sockets can be closed mid-handshake. On the relay path, this is what bounds a login by `ConnectTimeout` and lets `Close()` return; see [Known limits](#known-limits) for the paths around it.
-
-### Known limits
-
-go-xmpp dials on its own in two cases. Those sockets bypass the relay: they have no timeout and `Close()` cannot abort them, so a login may outlast `ConnectTimeout` and `Close()` may never return.
-
-- **Proxy variables.** With `HTTP_PROXY` (or `http_proxy`) set, go-xmpp sends the relay connection through that proxy unless `NO_PROXY` matches `127.0.0.1`. Whenever `HTTP_PROXY` is set, include `127.0.0.1` in `NO_PROXY`. The backend connection never uses a proxy, so a backend reachable only through one is unsupported.
-- **XMPP redirects.** A `<see-other-host>` stream error after STARTTLS makes go-xmpp dial the named host itself, inside TLS where the relay cannot intercept it. Redirects are unsupported. The Bosch backend is not known to send them; this is unverified.
+- A half-open connection (the peer vanished without closing) is noticed only when a request goes unanswered, or when the kernel gives up retransmitting a keepalive presence, which takes minutes. There is no read deadline; pushes stop silently until then. Poll with a request to notice sooner. The local device server also replaces such a session as soon as the device completes a new login.
+- The device server (`server.Server`, `nefit serve`) queues, relays and recovers as described under "Device server modes" in [README.md](README.md), which also lists its known limits.
 
 ## Production Recommendations
 
@@ -247,4 +251,4 @@ go-xmpp dials on its own in two cases. Those sockets bypass the relay: they have
 
 - See `examples/` directory for working code examples
 - Check test files for additional API endpoint usage
-- Review `types/status.go` for all available status fields
+- Review `types/types.go` for all available status fields

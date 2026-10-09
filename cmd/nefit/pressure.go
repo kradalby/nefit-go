@@ -15,7 +15,7 @@ var pressureCmd = &ffcli.Command{
 
 Example:
   nefit pressure
-  nefit pressure --pretty`,
+  nefit --pretty pressure`,
 	Exec: func(ctx context.Context, args []string) error {
 		c, err := createClient()
 		if err != nil {

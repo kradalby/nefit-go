@@ -1,0 +1,1 @@
+<iq xmlns="jabber:client" from='rrcgateway_123456789' to='wa2-mz36-qrmzh6.bosch.de' id='test' type='get'> <ping xmlns='urn:xmpp:ping'/></iq>

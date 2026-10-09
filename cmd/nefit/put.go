@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/kradalby/nefit-go/protocol"
 )
 
 var putCmd = &ffcli.Command{
@@ -22,7 +25,7 @@ The data should be valid JSON, typically in the format:
 
 Examples:
   nefit put /heatingCircuits/hc1/temperatureRoomManual '{"value":21.5}'
-  nefit put /ecus/rrc/usermode '{"value":"manual"}'
+  nefit put /heatingCircuits/hc1/usermode '{"value":"manual"}'
 
 For simple values, you can also use:
   nefit set temperature 21.5    # Easier than using PUT directly`,
@@ -33,10 +36,15 @@ For simple values, you can also use:
 
 		uri := args[0]
 		jsonData := args[1]
+		// Checked before logging in, so a typo costs no Bosch session.
+		if err := protocol.ValidateURI(uri); err != nil {
+			return err
+		}
 
-		// Parse JSON to validate it
-		var data any
-		if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
+		// Sent compacted but otherwise as given: decoding would reorder keys,
+		// escape <, > and & and round large integers.
+		var data bytes.Buffer
+		if err := json.Compact(&data, []byte(jsonData)); err != nil {
 			return fmt.Errorf("invalid JSON data: %w", err)
 		}
 
@@ -53,7 +61,7 @@ For simple values, you can also use:
 		reqCtx, cancel := context.WithTimeout(ctx, *timeout)
 		defer cancel()
 
-		if err := c.Put(reqCtx, uri, data); err != nil {
+		if err := c.Put(reqCtx, uri, data.String()); err != nil {
 			return fmt.Errorf("PUT request failed: %w", err)
 		}
 

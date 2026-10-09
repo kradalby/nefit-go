@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
-	"html"
 	"io"
 	"strconv"
 	"strings"
@@ -20,56 +20,67 @@ type HTTPResponse struct {
 	ContentType string
 }
 
+// ErrInvalidURI reports a request target that cannot be sent safely.
+var ErrInvalidURI = errors.New("invalid request URI")
+
+// ValidateURI accepts only an origin-form target ("/path?query") of visible
+// ASCII. Whitespace or control bytes would end the request line and start new
+// header lines or requests inside the HTTP-over-XMPP body; GetRequest,
+// PutRequest and the Build functions do not check, so callers must. Percent-encoding and queries pass unchanged.
+func ValidateURI(uri string) error {
+	if !strings.HasPrefix(uri, "/") {
+		return fmt.Errorf("%w %q: must start with /", ErrInvalidURI, uri)
+	}
+	for i := 0; i < len(uri); i++ {
+		if b := uri[i]; b <= ' ' || b >= 0x7f || b == '#' {
+			return fmt.Errorf("%w %q: byte %#x not allowed", ErrInvalidURI, uri, b)
+		}
+	}
+	return nil
+}
+
+// GetRequest returns the HTTP-over-XMPP text of a GET for uri.
+func GetRequest(uri string) string {
+	return "GET " + uri + " HTTP/1.1\r\nUser-Agent: NefitEasy\r\n\r\n"
+}
+
+// PutRequest returns the HTTP-over-XMPP text of a PUT carrying encrypted data.
+func PutRequest(uri, encryptedData string) string {
+	return fmt.Sprintf("PUT %s HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: %d\r\nUser-Agent: NefitEasy\r\n\r\n%s",
+		uri, len(encryptedData), encryptedData)
+}
+
 // BuildGetMessage constructs an HTTP GET request wrapped in an XMPP message stanza.
+//
+// Deprecated: check uri with ValidateURI, then xml.Marshal a MessageStanza
+// whose Body is GetRequest(uri).
 func BuildGetMessage(from, to, uri string) string {
-	body := fmt.Sprintf("GET %s HTTP/1.1\rUser-Agent: NefitEasy\r\r", uri)
-	return buildXMPPMessage(from, to, body)
+	return buildXMPPMessage(from, to, GetRequest(uri))
 }
 
 // BuildPutMessage constructs an HTTP PUT request wrapped in an XMPP message stanza.
+//
+// Deprecated: check uri with ValidateURI, then xml.Marshal a MessageStanza
+// whose Body is PutRequest(uri, encryptedData).
 func BuildPutMessage(from, to, uri string, encryptedData string) string {
-	body := fmt.Sprintf(
-		"PUT %s HTTP/1.1\r"+
-			"Content-Type: application/json\r"+
-			"Content-Length: %d\r"+
-			"User-Agent: NefitEasy\r"+
-			"\r"+
-			"%s",
-		uri,
-		len(encryptedData),
-		encryptedData,
-	)
-	return buildXMPPMessage(from, to, body)
+	return buildXMPPMessage(from, to, PutRequest(uri, encryptedData))
 }
 
 func buildXMPPMessage(from, to, body string) string {
-	// Escape XML special characters in body, but preserve \r as &#13;\n for protocol
-	escapedBody := escapeXMLBody(body)
-
-	return fmt.Sprintf(
-		`<message from="%s" to="%s"><body>%s</body></message>`,
-		html.EscapeString(from),
-		html.EscapeString(to),
-		escapedBody,
-	)
-}
-
-func escapeXMLBody(body string) string {
-	placeholder := "\x00CRLF\x00"
-	body = strings.ReplaceAll(body, "\r", placeholder)
-
-	escaped := html.EscapeString(body)
-
-	escaped = strings.ReplaceAll(escaped, placeholder, "&#13;\n")
-
-	return escaped
+	data, err := xml.Marshal(MessageStanza{From: from, To: to, Body: body})
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // ParseHTTPResponse parses an HTTP-over-XMPP response.
 func ParseHTTPResponse(data string) (*HTTPResponse, error) {
-	// Replace &#13; entities back to \r for HTTP parsing
+	// Callers may pass text that was never XML-decoded; decoded text holds
+	// this spelling only when a sender escaped CR twice.
 	data = strings.ReplaceAll(data, "&#13;", "\r")
-	data = strings.ReplaceAll(data, "\n", "\r\n")
+	data = strings.ReplaceAll(data, "\r\n", "\n")
+	data = strings.ReplaceAll(data, "\r", "\n")
 
 	reader := bufio.NewReader(strings.NewReader(data))
 
@@ -143,8 +154,6 @@ func ExtractBody(xmlData string) (string, error) {
 		return "", fmt.Errorf("failed to unmarshal message: %w", err)
 	}
 
-	body := msg.Body
-	body = strings.ReplaceAll(body, "&#13;", "\r")
-
-	return body, nil
+	// Decoded text holds &#13; only when a sender escaped CR twice.
+	return strings.ReplaceAll(msg.Body, "&#13;", "\r"), nil
 }

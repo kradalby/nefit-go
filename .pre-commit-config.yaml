@@ -17,12 +17,17 @@ repos:
       - id: check-symlinks
       - id: check-toml
       - id: check-xml
+        exclude: ^protocol/testdata/xmpp/.*\.open$
       - id: check-yaml
       - id: detect-private-key
       - id: end-of-file-fixer
+        # Captured XML byte spelling is verified by the fixture manifest.
+        exclude: ^protocol/testdata/xmpp/.*\.(xml|open)$
       - id: fix-byte-order-marker
       - id: mixed-line-ending
+        exclude: ^protocol/testdata/xmpp/.*\.(xml|open)$
       - id: trailing-whitespace
+        exclude: ^protocol/testdata/xmpp/.*\.(xml|open)$
 
   # Local hooks for project-specific tooling
   - repo: local
@@ -34,11 +39,19 @@ repos:
         types: [go]
         pass_filenames: false
 
+      # Fixture-only commits still run the corpus hash and sanitization tests.
       - id: go-test
         name: go test
         entry: go test -short -timeout=5m ./...
         language: system
-        types: [go]
+        files: (\.go|^protocol/testdata/xmpp/.*)$
+        pass_filenames: false
+
+      - id: research-tests
+        name: research tests
+        entry: python3 -m unittest discover -s research -p test_*.py
+        language: system
+        files: ^(research/.*\.py|protocol/testdata/xmpp/.*)$
         pass_filenames: false
 
       - id: go-mod-tidy
@@ -48,11 +61,11 @@ repos:
         files: ^go\.(mod|sum)$
         pass_filenames: false
 
-      # Format (treefmt via fc.formatter) + build are enforced through the
-      # repo's own checks; gated on flake/go changes.
+      # The flake's build, lint, format and NixOS-module checks; run when the
+      # flake, go.mod/go.sum or nix/ change.
       - id: nix-build-checks
         name: nix build checks
-        entry: bash -c 'nix build --fallback .#checks.x86_64-linux.build .#checks.x86_64-linux.golangci-lint .#checks.x86_64-linux.formatting'
+        entry: bash -c 'nix build --fallback .#checks.x86_64-linux.build .#checks.x86_64-linux.golangci-lint .#checks.x86_64-linux.formatting .#checks.x86_64-linux.nixos-module'
         language: system
-        files: ^(flake\.(nix|lock)|go\.(mod|sum))$
+        files: ^(flake\.(nix|lock)|go\.(mod|sum)|nix/.*\.nix)$
         pass_filenames: false

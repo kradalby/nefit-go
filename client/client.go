@@ -1,25 +1,25 @@
 package client
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	xmpp "github.com/xmppo/go-xmpp"
-
 	"github.com/kradalby/nefit-go/crypto"
 	"github.com/kradalby/nefit-go/protocol"
 )
+
+// maxPushHandlers bounds push handler calls running at once.
+const maxPushHandlers = 64
 
 // EventHandler is called when unsolicited messages are received from the backend
 type EventHandler func(uri string, data any)
@@ -31,22 +31,29 @@ type PushNotification struct {
 }
 
 // Client represents an active connection to the Nefit Easy backend.
-// It handles XMPP communication, encryption, request queueing, and push notifications.
+// It handles XMPP communication, encryption, request queueing, and push
+// notifications. Its methods are safe for concurrent use.
 type Client struct {
 	config    Config
 	encryptor *crypto.Encryptor
 	queue     *RequestQueue
 
-	dial func(context.Context) (transport, error)
-	conn atomic.Pointer[conn]
+	dial          func(context.Context) (transport, error)
+	localListener net.Listener
+	localMode     ServerMode
+	localReady    chan struct{} // guarded by mu; closed on a new session or listener failure
+	localErr      error         // guarded by mu; terminal listener failure
+	conn          atomic.Pointer[conn]
 	// mu serialises starting and publishing a dial against Close.
 	mu      sync.Mutex
 	dialing *dialCall
 
 	eventHandlers   []EventHandler
 	eventHandlersMu sync.RWMutex
+	pushSlots       chan struct{}
 
-	logger *slog.Logger
+	// logger is read by background workers started before SetLogger.
+	logger atomic.Pointer[slog.Logger]
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -73,26 +80,30 @@ func NewClient(config Config) (*Client, error) {
 		config:    config,
 		encryptor: encryptor,
 		queue:     NewRequestQueue(),
-		logger:    slog.Default(),
+		pushSlots: make(chan struct{}, maxPushHandlers),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+	client.logger.Store(slog.Default())
 	client.dial = client.dialBackend
 
 	return client, nil
 }
 
-// SetLogger configures a custom logger for the client.
-// By default, the client uses slog.Default().
+// SetLogger configures a custom logger for the client. By default, and after
+// SetLogger(nil), the client uses slog.Default().
 func (c *Client) SetLogger(logger *slog.Logger) {
-	c.logger = logger
+	// Workers log without checking; nil would crash one of them.
+	c.logger.Store(cmp.Or(logger, slog.Default()))
 }
+
+func (c *Client) log() *slog.Logger { return c.logger.Load() }
 
 // Connect opens a session unless one is live, so pushes flow before the
 // first request. Concurrent callers, requests included, share one login. A
 // nil error means a session was established; it may have ended since, so
 // watch Done. If ctx ends first, the login carries on for whoever needs a
-// session next, bounded by [Config.ConnectTimeout] save the cases it notes.
+// session next, bounded by [Config.ConnectTimeout].
 func (c *Client) Connect(ctx context.Context) error {
 	_, err := c.session(ctx)
 	return err
@@ -112,7 +123,11 @@ func (c *Client) session(ctx context.Context) (*conn, error) {
 	c.mu.Lock()
 	if c.ctx.Err() != nil {
 		c.mu.Unlock()
-		return nil, errClosed
+		return nil, ErrClosed
+	}
+	if err := c.localErr; err != nil {
+		c.mu.Unlock()
+		return nil, err
 	}
 	if cn := c.conn.Load(); cn != nil && cn.alive() {
 		c.mu.Unlock()
@@ -135,26 +150,37 @@ func (c *Client) session(ctx context.Context) (*conn, error) {
 }
 
 func (c *Client) runDial(d *dialCall) {
-	c.logger.Info("connecting to Nefit Easy backend",
-		"host", c.config.Host,
-		"jid", c.config.JID())
+	if c.localListener != nil {
+		c.log().Debug("waiting for the device to log in", "mode", c.localMode, "listen", c.localListener.Addr())
+	} else {
+		c.log().Info("connecting to Nefit Easy backend", "host", c.config.Host, "jid", c.config.JID())
+	}
 
 	ctx, cancel := context.WithTimeout(c.ctx, c.config.ConnectTimeout)
-	t, err := c.dial(ctx)
+	var t transport
+	var cn *conn
+	var err error
+	if c.localListener != nil {
+		cn, err = c.waitLocal(ctx)
+	} else {
+		t, err = c.dial(ctx)
+	}
 	cancel()
 
 	c.mu.Lock()
 	switch {
 	case c.ctx.Err() != nil:
-		if err == nil {
+		if t != nil {
 			_ = t.Close()
 		}
-		err = errClosed
+		err = ErrClosed
+	case c.localErr != nil:
+		err = c.localErr
 	case err == nil:
-		d.cn = newConn(c.ctx, t)
-		c.conn.Store(d.cn)
-		c.wg.Go(func() { c.pingWorker(d.cn) })
-		c.wg.Go(func() { c.receiveWorker(d.cn) })
+		if cn == nil {
+			cn = c.publishSession(t)
+		}
+		d.cn = cn
 	}
 	d.err = err
 	c.dialing = nil
@@ -163,41 +189,47 @@ func (c *Client) runDial(d *dialCall) {
 
 	switch {
 	case err == nil:
-		c.logger.Info("connected to Nefit Easy backend")
-	case !errors.Is(err, errClosed):
-		c.logger.Error("failed to connect to Nefit Easy backend", "error", err)
+		// acceptDevices logs device logins, replacements included.
+		if c.localListener == nil {
+			c.log().Info("connected to Nefit Easy backend")
+		}
+	case errors.Is(err, ErrClosed), errors.Is(err, ErrListenerFailed):
+		// The listener logs its own failure.
+	case c.localListener != nil && errors.Is(err, context.DeadlineExceeded):
+		// The device logs in on its own schedule: a quiet window is no failure.
+		c.log().Debug("no device login yet", "waited", c.config.ConnectTimeout)
+	default:
+		c.log().Error("failed to connect to Nefit Easy backend", "error", err)
 	}
 }
 
-func (c *Client) dialBackend(ctx context.Context) (transport, error) {
-	// Bosch servers require STARTTLS (plain TCP → TLS upgrade), not direct TLS
-	options := xmpp.Options{
-		User:     c.config.JID(),
-		Password: c.config.AuthPassword(),
-		NoTLS:    true,
-		StartTLS: true,
-		TLSConfig: &tls.Config{
-			ServerName: c.config.Host,
-			MinVersion: tls.VersionTLS12,
-		},
-		InsecureAllowUnencryptedAuth: false,
-	}
+// publishSession requires mu, fencing worker registration against Close.
+func (c *Client) publishSession(t transport) *conn {
+	cn := newConn(c.ctx, t)
+	c.conn.Store(cn)
+	c.wg.Go(func() { c.pingWorker(cn) })
+	c.wg.Go(func() { c.receiveWorker(cn) })
+	return cn
+}
 
-	return dialXMPP(ctx, net.JoinHostPort(c.config.Host, strconv.Itoa(c.config.Port)), options)
+func (c *Client) dialBackend(ctx context.Context) (transport, error) {
+	return dialCloud(ctx, c.config, &tls.Config{ServerName: c.config.Host, MinVersion: tls.VersionTLS12})
 }
 
 // Close disconnects from the XMPP server, stops background workers and waits
 // for running push handlers, so a handler must not call it. It is safe to
-// call more than once. It can hang on a connection go-xmpp dialled itself;
-// see "Known limits" in API_NOTES.md.
+// call more than once.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
-		c.logger.Info("closing Nefit Easy client")
+		c.log().Info("closing Nefit Easy client")
 
 		c.mu.Lock()
 		c.cancel()
 		cn := c.conn.Swap(nil)
 		c.mu.Unlock()
+		if c.localListener != nil {
+			_ = c.localListener.Close()
+		}
 
 		if cn != nil {
 			cn.close()
@@ -207,7 +239,7 @@ func (c *Client) Close() error {
 		c.queue.Close()
 		c.wg.Wait()
 
-		c.logger.Info("closed Nefit Easy client")
+		c.log().Info("closed Nefit Easy client")
 	})
 
 	return nil
@@ -220,9 +252,11 @@ func (c *Client) IsConnected() bool {
 }
 
 // Done returns a channel that is closed when the current connection ends:
-// the stream fails, the client is closed, or a request fails after it may
-// have gone out, since its late reply would pass for the answer to the next
-// one. Without a connection it is already closed.
+// the stream fails, the client is closed, or a sent request goes unanswered.
+// The cloud transport retires a session as soon as such a request is
+// abandoned, since its late reply would pass for the next one's answer; the
+// device server waits up to RequestTimeout for it. Without a connection it is
+// already closed.
 func (c *Client) Done() <-chan struct{} {
 	if cn := c.conn.Load(); cn != nil {
 		return cn.ctx.Done()
@@ -239,11 +273,11 @@ func (c *Client) pingWorker(cn *conn) {
 		case <-cn.ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := cn.xmpp.SendPresence(xmpp.Presence{}); err != nil {
-				c.logger.Error("failed to send ping", "error", err)
+			if err := cn.xmpp.Ping(); err != nil {
+				c.log().Error("failed to send ping", "error", err)
 				continue
 			}
-			c.logger.Debug("sent keepalive ping")
+			c.log().Debug("sent keepalive ping")
 		}
 	}
 }
@@ -254,16 +288,21 @@ func (c *Client) receiveWorker(cn *conn) {
 	defer cn.close()
 
 	for {
-		stanza, err := cn.xmpp.Recv()
+		in, err := cn.xmpp.Recv()
 		if cn.ctx.Err() != nil {
 			// Retired: whatever arrives now has no owner.
 			return
 		}
 		if err != nil {
-			c.logger.Error("connection lost", "error", err)
+			if errors.Is(err, errRecovering) {
+				c.log().Info("connection ended", "reason", err)
+			} else {
+				c.log().Error("connection lost", "error", err)
+			}
+			cn.fail(err)
 			return
 		}
-		c.handleStanza(cn, stanza)
+		c.handle(cn, in)
 	}
 }
 
@@ -274,65 +313,69 @@ func (c *Client) dispatchPushNotification(notification PushNotification) {
 	c.eventHandlersMu.RUnlock()
 
 	// Concurrent so a slow handler cannot stall the stream; tracked so Close
-	// does not return while one is still running.
+	// does not return while one is still running. Bounded so a device that
+	// floods pushes cannot exhaust memory: pushes past the bound are dropped.
 	for _, handler := range handlers {
-		c.wg.Go(func() { handler(notification.URI, notification.Data) })
+		select {
+		case c.pushSlots <- struct{}{}:
+		default:
+			c.log().Warn("push handlers busy; dropping push", "uri", notification.URI)
+			continue
+		}
+		c.wg.Go(func() {
+			defer func() { <-c.pushSlots }()
+			handler(notification.URI, notification.Data)
+		})
 	}
 }
 
-func (c *Client) handleStanza(cn *conn, stanza any) {
-	switch v := stanza.(type) {
-	case xmpp.Chat:
-		c.handleChatMessage(cn, v)
-	case xmpp.Presence, xmpp.IQ:
-	default:
-		c.logger.Debug("unknown stanza type", "type", fmt.Sprintf("%T", v))
-	}
-}
-
-func (c *Client) handleChatMessage(cn *conn, msg xmpp.Chat) {
-	c.logger.Debug("received chat message", "from", msg.Remote, "type", msg.Type)
-
-	if msg.Type == "error" {
-		c.logger.Error("received error message", "from", msg.Remote, "text", msg.Text)
-		c.route(cn, reply{err: fmt.Errorf("XMPP error: %s", msg.Text)})
+func (c *Client) handle(cn *conn, in inbound) {
+	if in.error {
+		c.log().Error("received error message", "text", in.text)
+		if !in.push {
+			c.route(cn, reply{err: fmt.Errorf("XMPP error: %s", in.text)}, in.owner)
+		}
 		return
 	}
-
-	if msg.Text == "" {
+	if in.text == "" {
 		return
 	}
-
-	resp, err := protocol.ParseHTTPResponse(msg.Text)
+	resp, err := protocol.ParseHTTPResponse(in.text)
 	if err != nil {
-		c.logger.Error("failed to parse HTTP response", "error", err, "body", msg.Text)
+		c.log().Debug("dropping unparseable reply", "error", err)
 		return
 	}
-
-	c.logger.Debug("parsed HTTP response", "status", resp.StatusCode)
-
-	c.route(cn, c.decode(resp))
+	c.log().Debug("parsed HTTP response", "status", resp.StatusCode)
+	r := decodeReply(c.encryptor, resp)
+	if in.push {
+		c.push(r)
+		return
+	}
+	c.route(cn, r, in.owner)
 }
 
 // Subscribe registers an event handler that will be called when the backend
 // sends unsolicited push notifications. Multiple handlers can be registered.
-// Handlers run concurrently; Close waits for them to return.
+// Handlers run concurrently; Close waits for them to return. While 64 handler
+// calls are running, further pushes are dropped, so a handler keeping state
+// from pushes should also poll.
 func (c *Client) Subscribe(handler EventHandler) {
 	c.eventHandlersMu.Lock()
 	defer c.eventHandlersMu.Unlock()
 	c.eventHandlers = append(c.eventHandlers, handler)
 }
 
-// decode decrypts a successful reply's body and picks out the resource path
-// the backend echoes as its JSON id.
-func (c *Client) decode(resp *protocol.HTTPResponse) reply {
+// decodeReply decrypts a successful reply's body and picks out the resource
+// path the backend echoes as its JSON id. The device bridge uses it too, so
+// both agree on which reply answers a request.
+func decodeReply(encryptor *crypto.Encryptor, resp *protocol.HTTPResponse) reply {
 	r := reply{resp: resp}
 	if resp.StatusCode != 200 || resp.Body == "" {
 		return r
 	}
 
 	// Strip: AES-ECB pads with NUL bytes, which break the JSON parse.
-	decrypted, err := c.encryptor.DecryptAndStrip(resp.Body)
+	decrypted, err := encryptor.DecryptAndStrip(resp.Body)
 	if err != nil {
 		r.err = fmt.Errorf("decryption failed: %w", err)
 		return r
@@ -354,147 +397,160 @@ func (c *Client) decode(resp *protocol.HTTPResponse) reply {
 
 // route hands r to the in-flight request if it can be its answer. Anything
 // else is a push notification.
-func (c *Client) route(cn *conn, r reply) {
-	if p := cn.match(r); p != nil {
+func (c *Client) route(cn *conn, r reply, owner *pending) {
+	if owner != nil {
+		if !owner.sent.Load() || !owner.answeredBy(r) {
+			c.push(r)
+			return
+		}
+		owner.replied.Store(true)
+	}
+	if p := cn.match(r, owner); p != nil {
 		p.reply <- r
 		return
 	}
+	if owner != nil {
+		// Its request stopped waiting; the reply answers nothing else.
+		c.log().Debug("dropping reply for an abandoned request")
+		return
+	}
+	c.push(r)
+}
 
+func (c *Client) push(r reply) {
 	if r.err != nil {
-		c.logger.Warn("dropping unmatched reply", "error", r.err)
+		c.log().Warn("dropping unmatched reply", "error", r.err)
 		return
 	}
 
 	if r.resp.StatusCode != 200 || r.data == nil {
-		c.logger.Debug("dropping unmatched reply", "status", r.resp.StatusCode)
+		c.log().Debug("dropping unmatched reply", "status", r.resp.StatusCode)
 		return
 	}
 
-	c.logger.Info("push notification received", "uri", r.id, "data", r.data)
+	c.log().Debug("push notification received", "uri", r.id, "data", r.data)
 	c.dispatchPushNotification(PushNotification{URI: r.id, Data: r.data})
 }
 
-// roundTrip sends msg on the current session and waits for its reply. The
+// roundTrip sends body on the current session and waits for its reply. The
 // session is read once: a reply can only arrive on the stream the request
 // went out on.
-func (c *Client) roundTrip(ctx context.Context, uri, msg string, get bool) (reply, error) {
-	chat, err := chatOf(msg)
-	if err != nil {
-		return reply{}, err
-	}
-
+func (c *Client) roundTrip(ctx context.Context, uri, body string, get bool) (reply, error) {
 	cn, err := c.session(ctx)
 	if err != nil {
 		return reply{}, err
 	}
-	// Unsent, an expired request costs nothing.
-	if err := ctx.Err(); err != nil {
-		return reply{}, err
-	}
-
 	// The queue runs one request at a time, so the slot is free. Claim it
-	// before sending: the reply may beat Send's return.
+	// before sending: the reply may beat Send's return. It matches only once
+	// the request is written, so a queued request cannot take a stray reply.
 	p := &pending{uri: uri, get: get, reply: make(chan reply, 1)}
 	cn.begin(p)
+	defer cn.abandon(p)
 
-	// From here the request may reach the backend, whose replies carry no
-	// request id: if it fails, its late reply would pass for the answer to
-	// the next, so the session goes with it. Closing also aborts a write the
-	// peer stopped reading.
-	stop := context.AfterFunc(ctx, cn.close)
-	defer stop()
-
-	if _, err := cn.xmpp.Send(chat); err != nil {
+	if err := cn.xmpp.Send(ctx, body, p); err != nil {
+		var unsent *unsentError
+		if errors.As(err, &unsent) {
+			if errors.Is(err, errSessionEnded) {
+				// The transport is already gone; retire the session now, or
+				// the retry would find it alive and fail the same way.
+				cn.close()
+			}
+			return reply{}, fmt.Errorf("request not sent: %w", err)
+		}
 		cn.close()
 		if ctx.Err() != nil {
 			return reply{}, fmt.Errorf("%w: %w", errUnanswered, ctx.Err())
 		}
-		return reply{}, fmt.Errorf("failed to send message: %w", err)
+		return reply{}, fmt.Errorf("failed to send message: %w: %w", errUnanswered, err)
 	}
-
 	select {
 	case r := <-p.reply:
 		return r, r.err
+	case <-ctx.Done():
 	case <-cn.ctx.Done():
-		if ctx.Err() != nil {
-			return reply{}, fmt.Errorf("%w: %w", errUnanswered, ctx.Err())
+	}
+	if !cn.abandon(p) {
+		// Matched before the deadline or session end: route sends it now.
+		r := <-p.reply
+		return r, r.err
+	}
+	if ctx.Err() != nil {
+		if _, bridged := cn.xmpp.(*localTransport); !bridged {
+			// Replies carry no request id: a late one would pass for the next
+			// request's answer, so an abandoned request takes its session
+			// along before the next can start. The device bridge instead
+			// decides which request a reply answers.
+			cn.close()
 		}
-		return reply{}, errConnectionLost
+		return reply{}, fmt.Errorf("%w: %w", errUnanswered, ctx.Err())
 	}
+	if c.ctx.Err() != nil {
+		return reply{}, ErrClosed
+	}
+	if cause := context.Cause(cn.ctx); errors.Is(cause, errUnanswered) {
+		return reply{}, cause
+	}
+	return reply{}, errConnectionLost
 }
 
-// chatOf unwraps the message stanza protocol builds, for go-xmpp to rewrap.
-func chatOf(msg string) (xmpp.Chat, error) {
-	var stanza struct {
-		To   string `xml:"to,attr"`
-		Body string `xml:"body"`
-	}
-	if err := xml.Unmarshal([]byte(msg), &stanza); err != nil {
-		return xmpp.Chat{}, fmt.Errorf("failed to parse message: %w", err)
-	}
-	return xmpp.Chat{Remote: stanza.To, Type: "chat", Text: stanza.Body}, nil
-}
-
-// retryable reports whether a failed attempt is worth repeating: it timed out
-// before reaching the backend. One that went out unanswered took its session
-// along, so a retry would cost a fresh login and, with the gateway silent,
-// fail the same way.
+// retryable permits a deadline or session end before the request was sent.
+// One that went out is not retried: its late reply could answer the retry,
+// and a write must not be replayed.
 func retryable(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errUnanswered)
+	if errors.Is(err, errUnanswered) {
+		return false
+	}
+	var unsent *unsentError
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &unsent) && errors.Is(err, errSessionEnded)
 }
 
 // Get performs a GET request to the specified URI and returns the decrypted response data.
-// It retries attempts that timed out before reaching the backend, and deserializes JSON responses.
+// It retries deadlines and session endings before sending, and deserializes JSON responses.
 func (c *Client) Get(ctx context.Context, uri string) (any, error) {
-	var lastErr error
-	attempts := 0
-	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
-		attempts++
-		if attempt > 0 {
-			c.logger.Debug("retrying GET request", "uri", uri, "attempt", attempt)
-		}
-
+	if err := protocol.ValidateURI(uri); err != nil {
+		return nil, err
+	}
+	for attempt := 1; ; attempt++ {
 		reqCtx, cancel := context.WithTimeout(ctx, c.config.RetryTimeout)
 		result, err := c.queue.Submit(reqCtx, func() (any, error) {
 			return c.executeGet(reqCtx, uri)
 		})
 		cancel()
-
 		if err == nil {
 			return result, nil
 		}
-
-		lastErr = err
-
-		if ctx.Err() != nil || !retryable(err) {
-			break
+		if attempt > c.config.MaxRetries || ctx.Err() != nil || !retryable(err) {
+			return nil, fmt.Errorf("GET request failed after %d attempts: %w", attempt, err)
 		}
+		c.log().Debug("retrying GET request", "uri", uri, "attempt", attempt, "last_error", err)
 	}
-
-	return nil, fmt.Errorf("GET request failed after %d attempts: %w", attempts, lastErr)
 }
 
 func (c *Client) executeGet(ctx context.Context, uri string) (any, error) {
-	msg := protocol.BuildGetMessage(c.config.JID(), c.config.ResourceJID(), uri)
+	c.log().Debug("sending GET request", "uri", uri)
 
-	c.logger.Debug("sending GET request", "uri", uri)
-
-	r, err := c.roundTrip(ctx, uri, msg, true)
+	r, err := c.roundTrip(ctx, uri, protocol.GetRequest(uri), true)
 	if err != nil {
 		return nil, err
 	}
 
 	if r.resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP error %d: %s", r.resp.StatusCode, r.resp.Status)
+		return nil, &HTTPError{StatusCode: r.resp.StatusCode, Status: r.resp.Status}
 	}
 
 	return r.data, nil
 }
 
 // Put performs a PUT request to the specified URI with the given data.
-// Data is automatically marshalled to JSON and encrypted before sending.
-// It retries, with exponential backoff, attempts that timed out before reaching the backend.
+// A string is sent as given; anything else is marshalled to JSON. Either is
+// encrypted before sending.
+// Deadlines before sending are retried with exponential backoff, and session
+// endings before sending at once, since the next login paces them; a write
+// that may have arrived is never replayed.
 func (c *Client) Put(ctx context.Context, uri string, data any) error {
+	if err := protocol.ValidateURI(uri); err != nil {
+		return err
+	}
 	var jsonData string
 	switch v := data.(type) {
 	case string:
@@ -507,7 +563,7 @@ func (c *Client) Put(ctx context.Context, uri string, data any) error {
 		jsonData = string(jsonBytes)
 	}
 
-	c.logger.Debug("PUT request data prepared",
+	c.log().Debug("PUT request data prepared",
 		"uri", uri,
 		"json_data", jsonData,
 		"json_length", len(jsonData))
@@ -517,95 +573,71 @@ func (c *Client) Put(ctx context.Context, uri string, data any) error {
 		return fmt.Errorf("failed to encrypt data: %w", err)
 	}
 
-	c.logger.Debug("PUT request encrypted",
+	c.log().Debug("PUT request encrypted",
 		"uri", uri,
 		"encrypted_length", len(encrypted))
 
-	var lastErr error
-	attempts := 0
 	backoff := c.config.RetryTimeout
-	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
-		attempts++
-		if attempt > 0 {
-			c.logger.Debug("retrying PUT request",
-				"uri", uri,
-				"attempt", attempt,
-				"backoff", backoff,
-				"last_error", lastErr)
-
-			// Exponential backoff: wait before retrying
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-
-			// Double the backoff for next attempt, up to 30 seconds
-			backoff *= 2
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-		}
-
+	for attempt := 1; ; attempt++ {
 		reqCtx, cancel := context.WithTimeout(ctx, c.config.RetryTimeout)
 		_, err := c.queue.Submit(reqCtx, func() (any, error) {
 			return nil, c.executePut(reqCtx, uri, encrypted, jsonData)
 		})
 		cancel()
-
 		if err == nil {
-			if attempt > 0 {
-				c.logger.Info("PUT request succeeded after retry",
-					"uri", uri,
-					"attempts", attempt+1)
+			if attempt > 1 {
+				c.log().Info("PUT request succeeded after retry", "uri", uri, "attempts", attempt)
 			}
 			return nil
 		}
-
-		lastErr = err
-
-		if ctx.Err() != nil {
-			break
+		if ctx.Err() == nil && !retryable(err) {
+			// Sent, answered or invalid requests are not retried.
+			c.log().Warn("PUT request failed with non-retryable error", "uri", uri, "error", err, "json_data", jsonData)
 		}
-
-		// 400 Bad Request indicates invalid data
-		if !retryable(err) {
-			c.logger.Warn("PUT request failed with non-retryable error",
-				"uri", uri,
-				"error", err,
-				"json_data", jsonData)
-			break
+		if attempt > c.config.MaxRetries || ctx.Err() != nil || !retryable(err) {
+			return fmt.Errorf("PUT request failed after %d attempts: %w", attempt, err)
 		}
+		// A session that ended before the write needs no backoff: waiting
+		// for the next login already paces the retry.
+		if errors.Is(err, errSessionEnded) {
+			continue
+		}
+		c.log().Debug("retrying PUT request", "uri", uri, "attempt", attempt, "backoff", backoff, "last_error", err)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.ctx.Done():
+			// Close waits for push handlers, which may be in this backoff.
+			return ErrClosed
+		}
+		backoff = min(2*backoff, 30*time.Second)
 	}
-
-	return fmt.Errorf("PUT request failed after %d attempts: %w", attempts, lastErr)
 }
 
 func (c *Client) executePut(ctx context.Context, uri, encryptedData, jsonData string) error {
-	msg := protocol.BuildPutMessage(c.config.JID(), c.config.ResourceJID(), uri, encryptedData)
-
-	c.logger.Debug("sending PUT request",
+	c.log().Debug("sending PUT request",
 		"uri", uri,
 		"from", c.config.JID(),
 		"to", c.config.ResourceJID(),
 		"encrypted_payload_length", len(encryptedData),
 		"decrypted_json", jsonData)
 
-	r, err := c.roundTrip(ctx, uri, msg, false)
+	r, err := c.roundTrip(ctx, uri, protocol.PutRequest(uri, encryptedData), false)
 	if err != nil {
 		return err
 	}
 
 	if r.resp.StatusCode >= 300 {
-		c.logger.Error("PUT request failed",
+		c.log().Error("PUT request failed",
 			"uri", uri,
 			"status_code", r.resp.StatusCode,
 			"status", r.resp.Status,
 			"json_data", jsonData)
-		return fmt.Errorf("HTTP error %d: %s", r.resp.StatusCode, r.resp.Status)
+		return &HTTPError{StatusCode: r.resp.StatusCode, Status: r.resp.Status}
 	}
 
-	c.logger.Debug("PUT request successful",
+	c.log().Debug("PUT request successful",
 		"uri", uri,
 		"status_code", r.resp.StatusCode)
 
