@@ -17,7 +17,7 @@
       flake-checks,
       ...
     }:
-    # Not eachDefaultSystem: nixpkgs 26.11 dropped x86_64-darwin and throws on eval.
+    # Not eachDefaultSystem: nixpkgs does not evaluate on x86_64-darwin.
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ] (
       system:
       let
@@ -27,8 +27,8 @@
         # directive, GOTOOLCHAIN=auto tries to fetch a toolchain from inside
         # the network-less treefmt sandbox and the `formatting` check fails.
         # buildGoLatestModule / go_latest keep this future-proof: bare
-        # `pkgs.go` and `pkgs.buildGoModule` still resolve to the previous
-        # stable (1.26), so both must be named explicitly.
+        # `pkgs.go` and `pkgs.buildGoModule` may lag behind go.mod, so both
+        # must be named explicitly.
         goOverlay = _: prev: {
           gotools = prev.gotools.override {
             buildGoModule = prev.buildGoLatestModule;
@@ -49,9 +49,9 @@
           root = ./.;
           pname = "nefit-go";
           version = "0.1.0";
-          vendorHash = "sha256-I09Qt/FaGBpNx6SN5zHBglhmQdaPM8wN+EjrNB92U/w=";
-          # go_latest, not bare `pkgs.go`: the latter still resolves to the
-          # previous stable (1.26) in nixpkgs. flake-checks feeds this to
+          vendorHash = "sha256-9I4lg8EK+EfUtDnaSAUU7snl21i4Za+fw3ql+vNlyx0=";
+          # go_latest, not bare `pkgs.go`, which may lag behind go.mod.
+          # flake-checks feeds this to
           # `buildGoModule.override { go = goPkg; }`, so this is the single
           # knob that pins every check to the newest Go.
           goPkg = pkgs.go_latest;
@@ -65,13 +65,38 @@
         checks = {
           build = fc.goBuild common;
           gotest = fc.goTest common;
+          # The race detector needs cgo; stdenv supplies the C compiler.
+          gotest-race = fc.goTest (
+            common
+            // {
+              name = "nefit-go-gotest-race";
+              goRace = true;
+              testEnv = "export CGO_ENABLED=1";
+            }
+          );
           golangci-lint = fc.goLint common;
           formatting = fc.goFormat common;
-          research = pkgs.runCommand "nefit-corpus-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-            export PYTHONDONTWRITEBYTECODE=1
-            python3 -m unittest discover -s ${./research} -p 'test_*.py'
-            touch "$out"
-          '';
+          research =
+            let
+              corpusSource = nixpkgs.lib.fileset.toSource {
+                root = ./.;
+                fileset = nixpkgs.lib.fileset.unions [
+                  ./research
+                  ./protocol/testdata/xmpp
+                ];
+              };
+            in
+            pkgs.runCommand "nefit-corpus-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+              export PYTHONDONTWRITEBYTECODE=1
+              python3 -m unittest discover -s ${corpusSource}/research -p 'test_*.py'
+              touch "$out"
+            '';
+        }
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          nixos-module = import ./nix/module-check.nix {
+            inherit pkgs nixpkgs;
+            module = ./nix/module.nix;
+          };
         };
 
         devShells.default = pkgs.mkShell {

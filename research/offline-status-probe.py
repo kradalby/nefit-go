@@ -5,6 +5,8 @@ Accepts the device's DIGEST-MD5 response without verifying its unknown password.
 Tests whether the device requires server rspauth. Sends only a status GET.
 Run only behind the device-specific firewall/NAT rule; this is not a server
 implementation suitable for general use. Exits after one reply or a timeout.
+The capture holds the device's SASL exchange. --mechanism PLAIN records the
+device's XMPP credentials in clear text if the device accepts PLAIN.
 """
 import argparse
 import base64
@@ -14,16 +16,21 @@ import secrets
 import socket
 import time
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
-os.umask(0o077)
+import private_output
+
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--listen', required=True, help='host:port the redirected device connects to')
+parser.add_argument('--device-ip', required=True, help='accept only this peer')
+parser.add_argument('--output', default=private_output.default())
 parser.add_argument('--mechanism', choices=['DIGEST-MD5', 'PLAIN'], default='DIGEST-MD5')
 parser.add_argument('--dummy-proof', action='store_true', help='Send a formatted but invalid rspauth proof')
 args = parser.parse_args()
+os.umask(0o077)
 domain = 'wa2-mz36-qrmzh6.bosch.de'
-directory = Path('/tmp/nefit-research')
+directory = private_output.directory(args.output)
+run = directory / f'offline-{time.time_ns()}'
 pattern = re.compile(
     rb"(?:<\?xml[^>]*\?>)|(?:<stream:stream\b[^>]*>)|"
     rb"(?:<(auth|response|iq|presence|message)\b[^>]*(?:/>|>.*?</\1>))", re.S)
@@ -36,16 +43,17 @@ def stream():
 
 with socket.socket() as listener:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(('10.65.0.27', 5222))
+    host, port = args.listen.rsplit(':', 1)
+    listener.bind((host, int(port)))
     listener.listen(1)
     listener.settimeout(90)
     print('Offline probe listening; no cloud socket', flush=True)
     device, peer = listener.accept()
-    if peer[0] != '192.168.156.96':
+    if peer[0] != args.device_ip:
         device.close()
         raise RuntimeError('unexpected peer')
     print('Device connected', flush=True)
-    with device, (directory / f'offline-{time.time_ns()}-device.bin').open('xb') as capture:
+    with device, private_output.create(f'{run}-device.bin') as capture:
         device.settimeout(20)
         pending = b''
         authenticated = False
@@ -61,7 +69,6 @@ with socket.socket() as listener:
             if not data:
                 raise RuntimeError('device closed connection')
             capture.write(data)
-            capture.flush()
             pending += data
             while True:
                 match = pattern.search(pending)
@@ -94,7 +101,8 @@ with socket.socket() as listener:
                         fields = credential.split(b'\x00')
                         if len(fields) != 3:
                             raise RuntimeError('malformed PLAIN authentication')
-                        (directory / 'device-plain-credentials.bin').write_bytes(credential)
+                        with private_output.create(f'{run}-plain-credentials.bin') as saved:
+                            saved.write(credential)
                         print('Received PLAIN authentication; credentials saved privately', flush=True)
                         authenticated = True
                         send('<success xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>')
@@ -126,7 +134,8 @@ with socket.socket() as listener:
                     requested = True
                     print('Sent offline status GET', flush=True)
                 elif kind == 'message' and '/localprobe' in element.attrib.get('to', ''):
-                    (directory / 'offline-status-response.xml').write_bytes(stanza)
+                    with private_output.create(f'{run}-status-response.xml') as response:
+                        response.write(stanza)
                     body = next((e.text or '' for e in element if e.tag.rsplit('}', 1)[-1] == 'body'), '')
                     print('Offline response:', body.splitlines()[0] if body else '(empty)', flush=True)
                     raise SystemExit(0)

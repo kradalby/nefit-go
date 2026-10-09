@@ -2,12 +2,12 @@ package client
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
 
-var errQueueStopped = errors.New("queue is stopped")
+var errQueueStopped = fmt.Errorf("%w: request queue stopped", ErrClosed)
 
 // A request leaves the queued state once: the worker starts it, or its
 // caller abandons it.

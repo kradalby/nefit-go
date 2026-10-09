@@ -1,12 +1,12 @@
 package protocol
 
 import (
+	"errors"
 	"testing"
 )
 
-// ParseHTTPResponse is the only parser for everything the thermostat sends
-// back, but had no test coverage. These lock in the status-line and header
-// handling so the strings.Cut rewrite cannot drift.
+// Every device reply goes through ParseHTTPResponse, so its status-line and
+// header handling is pinned here.
 
 func TestParseHTTPResponse(t *testing.T) {
 	tests := []struct {
@@ -111,7 +111,7 @@ func TestParseHTTPResponseInvalid(t *testing.T) {
 func TestExtractBodyRoundTrip(t *testing.T) {
 	// A GET message built by this package must survive extraction with its
 	// line separators intact, since ParseHTTPResponse depends on them.
-	// escapeXMLBody encodes each \r as "&#13;\n", so extraction yields \r\n.
+	// Request text uses CRLF line endings, which survive the XML round trip.
 	msg := BuildGetMessage("from@example.com", "to@example.com", "/heatingCircuits/hc1")
 
 	body, err := ExtractBody(msg)
@@ -122,5 +122,18 @@ func TestExtractBodyRoundTrip(t *testing.T) {
 	want := "GET /heatingCircuits/hc1 HTTP/1.1\r\nUser-Agent: NefitEasy\r\n\r\n"
 	if body != want {
 		t.Errorf("ExtractBody() = %q, want %q", body, want)
+	}
+}
+
+func TestValidateURI(t *testing.T) {
+	for _, uri := range []string{"/ecus/rrc/uiStatus", "/a?x=1&y=%20z", "/gateway/%75pdate"} {
+		if err := ValidateURI(uri); err != nil {
+			t.Errorf("%q rejected: %v", uri, err)
+		}
+	}
+	for _, uri := range []string{"", "relative", "/a b", "/a\tb", "/a\rX-Inj: 1", "/a\nPUT /gateway/update", "/a\x00", "/a\x7f", "/café", "/a#frag"} {
+		if err := ValidateURI(uri); !errors.Is(err, ErrInvalidURI) {
+			t.Errorf("%q accepted: %v", uri, err)
+		}
 	}
 }

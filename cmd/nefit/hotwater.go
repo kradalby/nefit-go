@@ -22,6 +22,17 @@ Examples:
   nefit hot-water on        # Turn on hot water
   nefit hot-water off       # Turn off hot water`,
 	Exec: func(ctx context.Context, args []string) error {
+		// Checked before logging in, so a typo costs no Bosch session.
+		var enabled bool
+		if len(args) > 0 {
+			switch args[0] {
+			case "on":
+				enabled = true
+			case "off":
+			default:
+				return fmt.Errorf("invalid argument %q (must be 'on' or 'off')", args[0])
+			}
+		}
 		c, err := createClient()
 		if err != nil {
 			return err
@@ -50,19 +61,7 @@ Examples:
 			return nil
 		}
 
-		// With argument - set status
 		arg := args[0]
-		var enabled bool
-
-		switch arg {
-		case "on":
-			enabled = true
-		case "off":
-			enabled = false
-		default:
-			return fmt.Errorf("invalid argument %q (must be 'on' or 'off')", arg)
-		}
-
 		if *verbose {
 			fmt.Fprintf(os.Stderr, "Setting hot water to %s...\n", arg)
 		}

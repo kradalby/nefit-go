@@ -7,10 +7,12 @@ import socket
 import struct
 import time
 
+import private_output
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("output")
-parser.add_argument("--interface", default="enp5s0")
-parser.add_argument("--target", default="192.168.156.96")
+parser.add_argument("--interface", required=True)
+parser.add_argument("--target", required=True, help="device IPv4 address")
 args = parser.parse_args()
 os.umask(0o077)
 target = socket.inet_aton(args.target)
@@ -27,7 +29,8 @@ signal.signal(signal.SIGINT, stop)
 with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as sock:
     sock.bind((args.interface, 0))
     sock.settimeout(1)
-    with open(args.output, "xb", buffering=0) as output:
+    # Records are framed by offset, so a short write must not slip them.
+    with private_output.create(args.output) as output:
         output.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
         print(f"Capturing {args.target} on {args.interface} to {args.output}", flush=True)
         while running:

@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/kradalby/nefit-go/protocol"
 )
 
 var getCmd = &ffcli.Command{
@@ -19,18 +21,23 @@ Common URIs:
   /ecus/rrc/uiStatus                          - System status
   /system/appliance/systemPressure            - System pressure
   /system/sensors/temperatures/outdoor_t1     - Outdoor temperature
-  /dhwCircuits/dhwA/dhwOperationMode          - Hot water mode
-  /ecus/rrc/usermode                          - User mode
+  /dhwCircuits/dhwA/dhwOperationManualMode    - Hot water in manual mode
+  /dhwCircuits/dhwA/dhwOperationClockMode     - Hot water in clock mode
+  /heatingCircuits/hc1/usermode               - User mode
 
 Examples:
   nefit get /ecus/rrc/uiStatus
-  nefit get /system/sensors/temperatures/outdoor_t1 --pretty`,
+  nefit --pretty get /system/sensors/temperatures/outdoor_t1`,
 	Exec: func(ctx context.Context, args []string) error {
 		if len(args) < 1 {
 			return fmt.Errorf("uri required: nefit get <uri>")
 		}
 
 		uri := args[0]
+		// Checked before logging in, so a typo costs no Bosch session.
+		if err := protocol.ValidateURI(uri); err != nil {
+			return err
+		}
 
 		c, err := createClient()
 		if err != nil {
