@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -16,7 +17,7 @@ const (
 	RRCGatewayPrefix = "rrcgateway_"
 
 	DefaultPingInterval = 30 * time.Second
-	DefaultMaxRetries   = 3 // Reduced from 15 - we now use exponential backoff
+	DefaultMaxRetries   = 3 // PUT retries back off exponentially
 	DefaultRetryTimeout = 2 * time.Second
 
 	DefaultConnectTimeout = 30 * time.Second
@@ -36,11 +37,11 @@ type Config struct {
 
 	// ConnectTimeout bounds a login. It runs apart from the request that
 	// triggered it, which may stop waiting sooner, so it needs its own bound.
-	// Every transport socket and protocol stage is owned and abortable.
 	ConnectTimeout time.Duration
 }
 
-// Validate ensures all required credentials are present.
+// Validate requires credentials and rejects negative timeouts, intervals and
+// retries.
 func (c *Config) Validate() error {
 	if c.SerialNumber == "" {
 		return fmt.Errorf("serial number is required")
@@ -51,11 +52,19 @@ func (c *Config) Validate() error {
 	if c.Password == "" {
 		return fmt.Errorf("password is required")
 	}
+	if c.ConnectTimeout < 0 || c.RetryTimeout < 0 || c.PingInterval < 0 || c.MaxRetries < 0 {
+		// Zero means the default; a negative one would expire every login
+		// at once or panic the ping ticker.
+		return fmt.Errorf("timeouts, intervals and retries must not be negative")
+	}
 	return nil
 }
 
 // WithDefaults returns a copy of the config with unset fields populated from defaults.
 func (c Config) WithDefaults() Config {
+	// The device names the domain in lower case without the root dot, and
+	// its login must match exactly.
+	c.Host = strings.TrimSuffix(strings.ToLower(c.Host), ".")
 	if c.Host == "" {
 		c.Host = DefaultHost
 	}

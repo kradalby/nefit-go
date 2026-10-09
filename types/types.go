@@ -7,7 +7,7 @@ type Status struct {
 	InHouseStatus            string  `json:"in_house_status"`               // Status of in-house sensor
 	InHouseTemp              float64 `json:"in_house_temp"`                 // Current indoor temperature
 	HotWaterActive           bool    `json:"hot_water_active"`              // Hot water system status
-	BoilerIndicator          string  `json:"boiler_indicator"`              // "CH" (central heating), "HW" (hot water), "No" (off)
+	BoilerIndicator          string  `json:"boiler_indicator"`              // "central heating", "hot water", "off", or the raw code
 	Control                  string  `json:"control"`                       // Control mode
 	TempOverrideDuration     int     `json:"temp_override_duration"`        // Minutes
 	CurrentSwitchpoint       int     `json:"current_switchpoint"`           // Current program switchpoint

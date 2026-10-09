@@ -185,10 +185,8 @@ func BenchmarkDecrypt(b *testing.B) {
 	}
 }
 
-// TestDecryptNonBlockMultipleLength guards the zero-padding in Decrypt.
 // Ciphertext length arrives off the wire, so a length that is not a whole
-// number of AES blocks must not panic the caller. Lengths 4, 20 and 24 all
-// used to panic with a slice-bounds error.
+// number of AES blocks must not panic the caller.
 func TestDecryptNonBlockMultipleLength(t *testing.T) {
 	enc, err := NewEncryptor("123456789", "abcdefghij", "secret")
 	if err != nil {
@@ -203,9 +201,8 @@ func TestDecryptNonBlockMultipleLength(t *testing.T) {
 	}
 }
 
-// TestDecryptAndStripRemovesPadding documents why the push-notification path
-// must use DecryptAndStrip: AES-ECB pads plaintext to a block boundary with
-// NUL bytes, and JSON parsing fails on the trailing NULs.
+// Every reply is decoded through DecryptAndStrip: AES-ECB pads plaintext to a
+// block boundary with NUL bytes, and JSON parsing fails on the trailing NULs.
 func TestDecryptAndStripRemovesPadding(t *testing.T) {
 	enc, err := NewEncryptor("123456789", "abcdefghij", "secret")
 	if err != nil {
@@ -239,7 +236,7 @@ func TestDecryptAndStripRemovesPadding(t *testing.T) {
 		t.Errorf("DecryptAndStrip() = %q, want %q", stripped, plaintext)
 	}
 
-	// The padded form is what broke JSON parsing before the fix.
+	// NUL padding breaks the JSON parse.
 	var v any
 	if err := json.Unmarshal([]byte(padded), &v); err == nil {
 		t.Error("expected NUL-padded plaintext to fail JSON parsing")

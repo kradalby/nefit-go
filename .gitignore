@@ -77,3 +77,14 @@ result
 result-*
 .envrc.local
 .claude/settings.local.json
+__pycache__/
+
+# Private research captures: device credentials and plaintext sessions
+*.bin
+*.xmpp
+*.pcap
+events.jsonl
+originals.json
+metadata.json
+*status-response.xml
+*status-request.xml

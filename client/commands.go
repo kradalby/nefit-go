@@ -2,10 +2,21 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/kradalby/nefit-go/types"
+)
+
+// ErrInvalidValue reports a command argument outside what the client
+// accepts; nothing was sent.
+var ErrInvalidValue = errors.New("invalid value")
+
+// SetTemperature accepts setpoints in this range, in degrees Celsius.
+const (
+	MinTemperature = 5.0
+	MaxTemperature = 30.0
 )
 
 // Status retrieves the complete system status including temperatures, modes, and boiler state.
@@ -91,6 +102,10 @@ func (c *Client) Pressure(ctx context.Context) (*types.Pressure, error) {
 // SetTemperature sets the manual temperature setpoint and enables manual override mode.
 // This requires three separate API calls to fully configure the temperature override.
 func (c *Client) SetTemperature(ctx context.Context, temperature float64) error {
+	// Written so NaN fails too.
+	if !(temperature >= MinTemperature && temperature <= MaxTemperature) {
+		return fmt.Errorf("%w: temperature %v is outside %v-%v°C", ErrInvalidValue, temperature, MinTemperature, MaxTemperature)
+	}
 	data := map[string]any{
 		"value": temperature,
 	}
@@ -128,25 +143,25 @@ func (c *Client) SetUserMode(ctx context.Context, mode string) error {
 	isValid := slices.Contains(validModes, mode)
 
 	if !isValid {
-		return fmt.Errorf("invalid mode: %q (valid values are: 'manual', 'clock'). Note: 'off' is not a valid mode", mode)
+		return fmt.Errorf("%w: mode %q (valid values are: 'manual', 'clock'). Note: 'off' is not a valid mode", ErrInvalidValue, mode)
 	}
 
 	data := map[string]string{
 		"value": mode,
 	}
 
-	c.logger.Debug("setting user mode",
+	c.log().Debug("setting user mode",
 		"mode", mode,
 		"uri", types.URIUserMode)
 
 	if err := c.Put(ctx, types.URIUserMode, data); err != nil {
-		c.logger.Error("failed to set user mode",
+		c.log().Error("failed to set user mode",
 			"mode", mode,
 			"error", err)
 		return err
 	}
 
-	c.logger.Info("user mode set successfully", "mode", mode)
+	c.log().Info("user mode set successfully", "mode", mode)
 	return nil
 }
 

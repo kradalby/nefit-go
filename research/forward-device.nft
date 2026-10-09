@@ -1,14 +1,20 @@
-# Temporary, device-scoped forwarding support. Existing FORWARD policy accepts
-# enp5s0-to-enp5s0 traffic. SNAT prevents UniFi's source policy routing from
-# sending forwarded traffic back here and ensures replies traverse this host.
+# Temporary, device-scoped forwarding for the research relays. Set the defines
+# to this host's LAN interface and address and the device address; the host
+# must already forward LAN-to-LAN traffic. SNAT keeps replies flowing back
+# through this host when the router would otherwise route them around it.
 # Remove with: sudo nft delete table ip nefit_research
+define lan = "eth0"
+define thermostat = 192.0.2.10
+define relay = 198.51.100.10
+
 table ip nefit_research {
     chain postrouting {
         type nat hook postrouting priority 99; policy accept;
-        iifname "enp5s0" oifname "enp5s0" ip saddr 192.168.156.96 counter snat to 10.65.0.27
+        iifname $lan oifname $lan ip saddr $thermostat counter snat to $relay
     }
     chain output {
+        # A redirect would tell the device to bypass this host.
         type filter hook output priority 0; policy accept;
-        ip daddr 192.168.156.96 icmp type redirect counter drop
+        ip daddr $thermostat icmp type redirect counter drop
     }
 }

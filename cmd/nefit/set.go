@@ -8,6 +8,8 @@ import (
 	"strconv"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/kradalby/nefit-go/client"
 )
 
 var setFlagSet = flag.NewFlagSet("set", flag.ExitOnError)
@@ -35,9 +37,7 @@ Examples:
 		setTemperatureCmd,
 		setUserModeCmd,
 	},
-	Exec: func(ctx context.Context, args []string) error {
-		return flag.ErrHelp
-	},
+	Exec: requireSubcommand,
 }
 
 var setTemperatureCmd = &ffcli.Command{
@@ -49,7 +49,9 @@ var setTemperatureCmd = &ffcli.Command{
 ⚠️  This will:
   1. Set the manual temperature
   2. Enable manual override
-  3. Switch to manual mode
+  3. Set the override temperature
+
+To switch user mode, run nefit set user-mode manual separately.
 
 Start with small changes (±0.5°C) to verify it works on your system.
 
@@ -65,9 +67,9 @@ Examples:
 		if err != nil {
 			return fmt.Errorf("invalid temperature value: %w", err)
 		}
-
-		if temp < 5 || temp > 30 {
-			return fmt.Errorf("temperature %v is outside reasonable range (5-30°C)", temp)
+		// Checked before logging in; SetTemperature applies the same range.
+		if !(temp >= client.MinTemperature && temp <= client.MaxTemperature) {
+			return fmt.Errorf("temperature %v is outside %v-%v°C", temp, client.MinTemperature, client.MaxTemperature)
 		}
 
 		c, err := createClient()

@@ -4,125 +4,117 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
-	"sync"
+	"net/netip"
 	"time"
 
 	"github.com/kradalby/nefit-go/client"
 )
 
-type Mode = client.ServerMode
-
-const (
-	Offline = client.ModeOffline
-	Both    = client.ModeBoth
-)
-
-type UpdatePolicy = client.UpdatePolicy
-
-const (
-	AllowUpdates = client.UpdatesAllow
-	BlockUpdates = client.UpdatesBlock
-)
-
-var ErrClosed = errors.New("server closed")
-
-// Config embeds the same device credentials and API used by cloud clients.
-// UpstreamAddress may specify a resolved cloud IP to bypass a DNS override.
+// Config holds the device credentials in Device, as for a cloud client, and
+// embeds LocalOptions, which documents the listener defaults. DNS, when set,
+// also starts the DNS endpoint.
 type Config struct {
-	Device            client.Config
-	Mode              Mode
-	ListenAddress     string
-	DeviceIP          net.IP
-	UpstreamAddress   string
-	UpdatePolicy      UpdatePolicy
-	UpdateServices    []string
-	RequestTimeout    time.Duration
-	ReconnectInterval time.Duration
-	Service           client.ServiceHandler
-	DNS               *DNSConfig
+	Device client.Config
+	client.LocalOptions
+	DNS *DNSConfig
 }
 
 // Server owns its listener and device session. Its embedded Client exposes the
 // same Get/Put, typed commands, subscriptions and lifecycle as a cloud client.
-// New binds the listener; Run maintains connectivity until cancellation. Embedded
-// applications may instead call Connect and watch Done using their existing loop.
+// New binds the listener, and devices are admitted from then until Close,
+// whether or not anyone calls Run or Connect. Run reports a failed listener
+// and closes the server when it returns. Call Close and SetLogger on the
+// Server rather than its Client: they also cover the DNS endpoint. Like
+// Client, it is safe for concurrent use.
 type Server struct {
 	*client.Client
-	mode      Mode
-	dns       *DNS
-	closed    chan struct{}
-	closeOnce sync.Once
-	closeErr  error
+	dns *dnsEndpoint
 }
 
+// New binds the device listener and, when configured, the DNS endpoint. The
+// endpoint answers the device IP's queries for its XMPP host, with the
+// listener's port unless DNS.XMPPPort is set; its Address must be one the
+// device reaches the listener on.
 func New(cfg Config) (*Server, error) {
-	c, err := client.NewLocalClient(cfg.Device, client.LocalOptions{ListenAddress: cfg.ListenAddress, DeviceIP: cfg.DeviceIP, Mode: cfg.Mode, UpstreamAddress: cfg.UpstreamAddress, UpdatePolicy: cfg.UpdatePolicy, UpdateServices: append([]string(nil), cfg.UpdateServices...), RequestTimeout: cfg.RequestTimeout, ReconnectInterval: cfg.ReconnectInterval, Service: cfg.Service})
+	c, err := client.NewLocalClient(cfg.Device, cfg.LocalOptions)
 	if err != nil {
 		return nil, err
 	}
-	mode := cfg.Mode
-	if mode == "" {
-		mode = Offline
-	}
-	s := &Server{Client: c, mode: mode, closed: make(chan struct{})}
+	s := &Server{Client: c}
 	if cfg.DNS != nil {
 		dnsConfig := *cfg.DNS
+		dnsConfig.hostname = cfg.Device.WithDefaults().Host
+		dnsConfig.deviceIP = cfg.DeviceIP
+		listener := c.LocalAddress().(*net.TCPAddr)
 		if dnsConfig.XMPPPort == 0 {
-			dnsConfig.XMPPPort = uint16(c.LocalAddress().(*net.TCPAddr).Port)
+			dnsConfig.XMPPPort = uint16(listener.Port)
 		}
-		s.dns, err = NewDNS(dnsConfig)
-		if err != nil {
+		// The device follows the answer, so the XMPP listener must accept there.
+		bound, _ := netip.AddrFromSlice(listener.IP)
+		// A loopback answer sends the device to itself, unless it is local.
+		if address := dnsConfig.Address.Unmap(); address.IsUnspecified() || address.IsLoopback() && !dnsConfig.deviceIP.Unmap().IsLoopback() ||
+			!bound.IsUnspecified() && bound.Unmap() != address.WithZone("") {
+			_ = c.Close()
+			return nil, fmt.Errorf("DNS address %s is not an address the device reaches the XMPP listener %s on", dnsConfig.Address, listener)
+		}
+		if s.dns, err = openDNS(dnsConfig); err != nil {
 			_ = c.Close()
 			return nil, err
 		}
 	}
 	return s, nil
 }
-func (s *Server) Mode() Mode { return s.mode }
+
+// SetLogger sets the logger of the device session and the DNS endpoint; nil
+// restores slog.Default().
+func (s *Server) SetLogger(logger *slog.Logger) {
+	s.Client.SetLogger(logger)
+	if s.dns != nil {
+		s.dns.logger.Store(logger)
+	}
+}
+
+// Run blocks until ctx ends, the server or its client is closed
+// (client.ErrClosed), or the listener fails (client.ErrListenerFailed), and
+// closes the server when it returns. An application draining HTTP on the
+// same signal should give Run a context it cancels after the drain.
 func (s *Server) Run(ctx context.Context) error {
-	stop := context.AfterFunc(ctx, func() { _ = s.Close() })
-	defer stop()
 	defer func() { _ = s.Close() }()
 	for {
-		if err := s.stopped(ctx); err != nil {
-			return err
-		}
+		start := time.Now()
 		if err := s.Connect(ctx); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("server stopped: %w", ctx.Err())
+			}
+			// Neither recovers: a failed listener stays failed, and a client
+			// closed directly (for example through the embedded field) is done.
+			if errors.Is(err, client.ErrListenerFailed) || errors.Is(err, client.ErrClosed) {
+				return err
+			}
+			// Waiting for a device dials nothing; the floor only keeps a tiny
+			// ConnectTimeout from spinning.
 			select {
 			case <-ctx.Done():
-			case <-s.closed:
-			case <-time.After(time.Second):
+			case <-time.After(time.Second - time.Since(start)):
 			}
 			continue
 		}
 		select {
 		case <-ctx.Done():
-		case <-s.closed:
+			// Connect would keep returning the live session until Close ends it.
+			return fmt.Errorf("server stopped: %w", ctx.Err())
 		case <-s.Done():
 		}
 	}
 }
 
-func (s *Server) stopped(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("server stopped: %w", err)
-	}
-	select {
-	case <-s.closed:
-		return ErrClosed
-	default:
-		return nil
-	}
-}
-
+// Close releases the DNS endpoint, the listener and the session; it is safe
+// to call more than once.
 func (s *Server) Close() error {
-	s.closeOnce.Do(func() {
-		close(s.closed)
-		if s.dns != nil {
-			_ = s.dns.Close()
-		}
-		s.closeErr = s.Client.Close()
-	})
-	return s.closeErr
+	if s.dns != nil {
+		_ = s.dns.Close()
+	}
+	return s.Client.Close()
 }
