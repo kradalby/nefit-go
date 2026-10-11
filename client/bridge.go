@@ -591,6 +591,12 @@ func (t *localTransport) runBridge() error {
 	defer timer.Stop()
 	probe := time.NewTicker(t.options.ReconnectInterval)
 	defer probe.Stop()
+	var heartbeats <-chan time.Time
+	if t.options.Mode == ModeBoth {
+		heartbeat := time.NewTicker(t.config.PingInterval)
+		defer heartbeat.Stop()
+		heartbeats = heartbeat.C
+	}
 	for {
 		if err := t.sendNext(); err != nil {
 			return err
@@ -613,6 +619,15 @@ func (t *localTransport) runBridge() error {
 				t.health.ok()
 			}
 			t.startProbe()
+		case <-heartbeats:
+			// Local reads and pings never reach Bosch. Keep its gateway
+			// stream alive independently, using the authenticated device JID.
+			// This loop owns upstream writes, including their deadlines.
+			if t.upstreamConnected.Load() {
+				if err := t.toCloud(wire.Presence{From: t.config.ResourceJID()}); err != nil {
+					t.disconnectCloud()
+				}
+			}
 		case <-t.recovery:
 			t.recovering = true
 		case event := <-t.inputs:
