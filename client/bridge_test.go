@@ -54,6 +54,30 @@ func bothTestClient(t *testing.T, policy UpdatePolicy) (*Client, *deviceFixture,
 	return bothHandshakeClient(t, policy, nil, nil)
 }
 
+func TestBothKeepsIdleBoschStreamAlive(t *testing.T) {
+	t.Parallel()
+	c, _, cloud := bothHandshakeClient(t, UpdatesBlock, nil, nil, func(cfg *Config, _ *LocalOptions) {
+		cfg.PingInterval = 20 * time.Millisecond
+	})
+	// Bosch closes an otherwise idle stream after five minutes. Shorten the
+	// idle window here; local-device pings alone must not keep this peer alive.
+	for range 3 {
+		if err := cloud.conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		e := cloud.next(t)
+		if e.Name != (xml.Name{Space: wire.ClientNS, Local: "presence"}) || e.Get("from") != c.config.ResourceJID() {
+			t.Fatalf("upstream heartbeat must speak for the gateway: %v", e)
+		}
+		if e.Get("to") != "" || e.Get("type") != "" {
+			t.Fatal("upstream heartbeat must advertise normal availability")
+		}
+	}
+	if !c.IsConnected() || !c.UpstreamConnected() {
+		t.Fatal("idle heartbeat lost the device or relay")
+	}
+}
+
 func bothHandshakeClient(t *testing.T, policy UpdatePolicy, cloudHook func(*cloudFixture, wire.Frame), deviceHook func(*deviceFixture), configure ...func(*Config, *LocalOptions)) (*Client, *deviceFixture, *cloudFixture) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -363,6 +387,44 @@ func TestBlockedLocalWritePreservesSession(t *testing.T) {
 type failingCloudWrite struct{ net.Conn }
 
 func (failingCloudWrite) Write([]byte) (int, error) { return 0, errors.New("upstream write failed") }
+
+func TestBothHeartbeatWriteFailurePreservesLocalService(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, Config{PingInterval: 20 * time.Millisecond})
+	socket, device := net.Pipe()
+	up, cloud := net.Pipe()
+	t.Cleanup(func() { _ = device.Close(); _ = cloud.Close() })
+	tr := testBridge(t, c, socket, failingCloudWrite{up}, LocalOptions{Mode: ModeBoth, RequestTimeout: time.Second, ReconnectInterval: time.Hour})
+	c.dial = func(context.Context) (transport, error) { return tr, nil }
+	if err := c.Connect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitCloudLoss(t, c)
+	if !c.IsConnected() {
+		t.Fatal("failed cloud heartbeat ended the device session")
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Put(t.Context(), "/local", map[string]int{"value": 1}) }()
+	if err := device.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := wire.NewReader(device)
+	for {
+		frame, err := reader.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.Element != nil && frame.Element.Name.Local == "message" {
+			break
+		}
+	}
+	response := wire.E(wire.ClientNS, "message", wire.Text(wire.ClientNS, "body", "HTTP/1.0 204 No Content\r\n\r\n"))
+	response.Set("to", c.config.JID()+"/localprobe")
+	tr.inputs <- frameEvent{frame: wire.Frame{Element: &response}}
+	if err := wait(t, done); err != nil {
+		t.Fatal("local write failed after cloud heartbeat failure:", err)
+	}
+}
 
 func TestBothNonMessageWriteFailurePreservesSession(t *testing.T) {
 	t.Parallel()
