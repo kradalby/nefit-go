@@ -107,6 +107,7 @@ Request lifecycle:
 In `both`:
 
 - Gateway presence keepalives keep the Bosch relay alive during local-only activity, using `Config.PingInterval` (30 seconds by default).
+- Bosch output uses a bounded queue and a separate writer, so upstream backpressure does not delay local replies. Its write deadline includes queue time; a write failure or full queue drops the relay while local control continues.
 - If Bosch is unreachable, rejects the relayed login (its bind or session included), or drops the relay, the device is served offline. Relaying is retried after 1 minute, doubling on each consecutive failure up to 32 minutes; a relay that stays up for a minute resets the backoff. Bosch ending the old relay because a reconnecting device logged in again is not counted.
 - After a loss, nefit checks that Bosch offers an XMPP login again, then reconnects the device once no request is in flight. That check cannot prove Bosch will accept the gateway.
 - If Bosch disconnects after login, local control continues; app requests not yet sent are dropped.
