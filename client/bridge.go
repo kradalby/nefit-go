@@ -44,6 +44,8 @@ type localTransport struct {
 	cancel            context.CancelFunc
 	upstream          net.Conn
 	upstreamConnected atomic.Bool
+	upstreamWrites    chan upstreamWrite
+	upstreamFinishing bool        // owned by runBridge, like the request queue
 	superseded        atomic.Bool // a newer device login is being relayed
 	probeRunning      atomic.Bool
 	recovery          chan struct{}
@@ -81,6 +83,8 @@ type (
 		cloud bool
 		frame wire.Frame
 		err   error
+		// fallback answers a device IQ whose upstream write failed.
+		fallback *wire.IQ
 	}
 	bridgeRequest struct {
 		message wire.Message
@@ -308,6 +312,9 @@ func reservedSource(e *wire.Element) bool {
 // sender instead of the shared device session. An error means a write to
 // Bosch failed.
 func (t *localTransport) admitCloud(e *wire.Element) (relay bool, err error) {
+	if t.upstreamFinishing {
+		return false, nil
+	}
 	if reservedSource(e) {
 		t.log().Warn("dropping cloud stanza claiming the local resource")
 		return false, nil
@@ -371,16 +378,42 @@ func (t *localTransport) initBridge(upstream net.Conn) {
 	}
 }
 
-// toCloud writes a relayed frame or a typed stanza to Bosch.
+// toCloud writes during login, then queues immutable encoded stanzas once
+// the bridge runs. Upstream backpressure must not hold up device replies.
 func (t *localTransport) toCloud(v any) error {
+	return t.writeToCloud(v, nil)
+}
+
+func (t *localTransport) writeToCloud(v any, fallback *wire.IQ) error {
 	if t.upstream == nil {
 		return errors.New("upstream unavailable")
 	}
-	_ = t.upstream.SetWriteDeadline(time.Now().Add(t.options.RequestTimeout))
-	defer func() { _ = t.upstream.SetWriteDeadline(time.Time{}) }()
+	if t.upstreamFinishing {
+		return errors.New("upstream is closing")
+	}
 	// Relayed stanzas speak for the device, so they keep its lexical form.
-	_, err := writeTyped(t.upstream, v)
-	return err
+	data, err := wire.Marshal(v, true)
+	if err != nil {
+		return err
+	}
+	write := upstreamWrite{data: data, deadline: time.Now().Add(t.options.RequestTimeout), fallback: fallback}
+	if t.upstreamWrites == nil {
+		return writeUpstream(t.upstream, write)
+	}
+	if !t.upstreamConnected.Load() {
+		return errors.New("upstream unavailable")
+	}
+	select {
+	case <-t.ctx.Done():
+		return t.ctx.Err()
+	default:
+	}
+	select {
+	case t.upstreamWrites <- write:
+		return nil
+	default:
+		return errors.New("upstream output queue is full")
+	}
 }
 
 // relayToDevice forwards a cloud stanza. One that cannot be re-encoded is
@@ -587,6 +620,7 @@ func (t *localTransport) startProbe() {
 // runBridge owns the device connection after login: it schedules one request
 // at a time and decides, per device message, which request it answers.
 func (t *localTransport) runBridge() error {
+	t.startUpstreamWriter()
 	timer := time.NewTicker(100 * time.Millisecond)
 	defer timer.Stop()
 	probe := time.NewTicker(t.options.ReconnectInterval)
@@ -615,15 +649,15 @@ func (t *localTransport) runBridge() error {
 		case <-timer.C:
 			err = t.expire()
 		case <-probe.C:
-			if t.upstreamConnected.Load() {
+			if t.upstreamConnected.Load() && !t.upstreamFinishing {
 				t.health.ok()
 			}
 			t.startProbe()
 		case <-heartbeats:
 			// Local reads and pings never reach Bosch. Keep its gateway
 			// stream alive independently, using the authenticated device JID.
-			// This loop owns upstream writes, including their deadlines.
-			if t.upstreamConnected.Load() {
+			// The upstream writer owns socket writes and their deadlines.
+			if t.upstreamConnected.Load() && !t.upstreamFinishing {
 				if err := t.toCloud(wire.Presence{From: t.config.ResourceJID()}); err != nil {
 					t.disconnectCloud()
 				}
@@ -683,6 +717,11 @@ func (t *localTransport) disconnectCloud() {
 			t.health.fail(t.options.ReconnectInterval)
 		}
 		_ = t.upstream.Close()
+		if t.upstreamWrites != nil {
+			// Only runBridge produces output or disconnects the relay. The
+			// writer drains queued IQ fallbacks after the channel closes.
+			close(t.upstreamWrites)
+		}
 		t.log().Warn("Bosch connection lost; local service remains available")
 	}
 	// The device still owes an active cloud request its reply. Dropping only
@@ -698,6 +737,9 @@ func (t *localTransport) sendNext() error {
 		i := max(slices.IndexFunc(t.queue, func(r bridgeRequest) bool { return r.sent != nil }), 0)
 		r := t.queue[i]
 		t.queue = slices.Delete(t.queue, i, i+1)
+		if r.sent == nil && t.upstreamFinishing {
+			continue
+		}
 		if r.sent == nil && t.stalled[r.message.From] != nil {
 			t.refuse(r.message, "504 Gateway Timeout")
 			continue
@@ -748,7 +790,7 @@ func (t *localTransport) expire() error {
 	t.refuse(a.request.message, "504 Gateway Timeout")
 	t.active = nil
 	if len(t.stalled) >= maxStalledSenders {
-		t.disconnectCloud()
+		t.finishUpstream()
 	}
 	return nil
 }
@@ -756,6 +798,12 @@ func (t *localTransport) expire() error {
 // fromCloud handles a Bosch-side frame; only a failed relay to the device ends
 // the session.
 func (t *localTransport) fromCloud(event frameEvent) error {
+	if event.fallback != nil {
+		if event.err != nil {
+			t.disconnectCloud()
+		}
+		return t.write(*event.fallback)
+	}
 	if !t.upstreamConnected.Load() {
 		return nil
 	}
@@ -794,13 +842,18 @@ func (t *localTransport) fromDevice(event frameEvent) error {
 			// Replies to the local keepalive belong to no one upstream.
 			return nil
 		}
-		if t.upstreamConnected.Load() {
-			if err := t.toCloud(event.frame); err == nil {
+		reply, canReply := iqReply(e, e.Get("to"))
+		if t.upstreamConnected.Load() && !t.upstreamFinishing {
+			var fallback *wire.IQ
+			if canReply {
+				fallback = &reply
+			}
+			if err := t.writeToCloud(event.frame, fallback); err == nil {
 				return nil
 			}
 			t.disconnectCloud()
 		}
-		if reply, ok := iqReply(e, e.Get("to")); ok {
+		if canReply {
 			return t.write(reply)
 		}
 		return nil
@@ -833,7 +886,7 @@ func (t *localTransport) fromDevice(event frameEvent) error {
 		case <-t.ctx.Done():
 			return t.ctx.Err()
 		}
-	case t.upstreamConnected.Load():
+	case t.upstreamConnected.Load() && !t.upstreamFinishing:
 		if err := t.toCloud(event.frame); err != nil {
 			t.disconnectCloud()
 		}
